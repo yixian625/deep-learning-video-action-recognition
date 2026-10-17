@@ -1,7 +1,11 @@
-torch
-torchvision
-opencv-python
-scikit-learn
-tqdm
-numpy
-Pillow
+# GPU (CUDA 13.0) build of PyTorch; install with:
+#   pip install -r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.14.1+cu130
+torchvision==0.29.1+cu130
+opencv-python==5.0.0.93
+scikit-learn==1.9.1
+tqdm==4.70.1
+numpy==2.5.2
+Pillow==12.3.0
+wandb==0.31.0
