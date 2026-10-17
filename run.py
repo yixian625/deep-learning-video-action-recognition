@@ -31,6 +31,7 @@ from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
 import numpy as np
+import wandb
 
 from video_datasets import VideoDataset, load_dataset, dataset_split
 from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
@@ -62,6 +63,7 @@ def args_parser():
         -d/--dropout: Dropout rate for regularization (default 0.1).
         -lr/--learning_rate: Learning rate for training (default 3e-5).
         -ne/--n_epochs: Number of training epochs (default 30).
+        -wm/--wandb_mode: Weights & Biases mode: 'online', 'offline' or 'disabled' (default 'online').
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -83,6 +85,8 @@ def args_parser():
     parser.add_argument('-d', '--dropout', type=float, default=0.1, help='Dropout rate for regularization')
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
+    parser.add_argument('-wm', '--wandb_mode', default='online', choices=['online', 'offline', 'disabled'],
+                        help='Weights & Biases logging mode')
 
     args = parser.parse_args()
     return args
@@ -132,6 +136,9 @@ def main(args):
     learning_rate = args.learning_rate
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
+    # Start a Weights & Biases run to track this experiment
+    wandb.init(project='video-action-lrcn', job_type=mode, config=vars(args), mode=args.wandb_mode)
+
     # Load transformation statistics and create data augmentation transforms
     h, w, mean, std = transform_stats(model_type)
     tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std)
@@ -159,7 +166,7 @@ def main(args):
         # Define the loss function, optimizer, and learning rate scheduler
         loss_func = nn.CrossEntropyLoss(reduction='sum')
         opt = optim.Adam(model.parameters(), lr=learning_rate)
-        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5, verbose=1)
+        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
         os.makedirs("./models", exist_ok=True)
         optim_model_dir = './models'
 
@@ -183,12 +190,32 @@ def main(args):
         targets, outputs, accuracy = test(model, dataloaders['test'], device)
 
         print('The overall test accuracy is {:.4f}%.'.format(100 * accuracy))
-        # Optionally, generate a detailed test report or confusion matrix:
-        # print(get_test_report(targets, outputs, all_cats))
-        # print(get_confusion_matrix(targets, outputs, labels_dict, all_cats))
+
+        # Recover class names from the saved split paths (<frame_dir>/<class>/<video>)
+        labels_dict = {}
+        for split in splits.item().values():
+            for vid_path, label in split:
+                labels_dict[os.path.basename(os.path.dirname(vid_path))] = int(label)
+        all_cats = sorted(labels_dict, key=labels_dict.get)
+
+        # Log test accuracy, per-class report and confusion matrix to W&B
+        report = get_test_report(targets, outputs, all_cats)
+        report_table = wandb.Table(columns=['class', 'precision', 'recall', 'f1-score', 'support'])
+        for cat in all_cats:
+            report_table.add_data(cat, *[report[cat][k] for k in ['precision', 'recall', 'f1-score', 'support']])
+        wandb.log({
+            'test/accuracy': accuracy,
+            'test/classification_report': report_table,
+            'test/confusion_matrix': wandb.plot.confusion_matrix(
+                y_true=targets, preds=outputs, class_names=all_cats),
+        })
+        wandb.run.summary['test/accuracy'] = accuracy
+        wandb.run.summary['test/macro_f1'] = report['macro avg']['f1-score']
 
     else:
         raise ValueError('The mode argument must be either "train" or "eval".')
+
+    wandb.finish()
 
 if __name__ == "__main__":
     args = args_parser()
