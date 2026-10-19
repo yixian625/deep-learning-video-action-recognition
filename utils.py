@@ -200,3 +200,25 @@ def test_dloaders(test_dataset, batch_size, model='lrcn'):
     dataloaders = {'test': test_dl}
     return dataloaders
 
+
+def compose_dataloaders(train_dataset, val_dataset, test_dataset, batch_size, model='lrcn'):
+    """
+    Create DataLoaders for training, validation, and test datasets.
+
+    Combines train_val_dloaders and test_dloaders so that all three splits use the
+    collate function matching the model type.
+
+    Args:
+        train_dataset (Dataset): PyTorch Dataset for training data.
+        val_dataset (Dataset): PyTorch Dataset for validation data.
+        test_dataset (Dataset): PyTorch Dataset for test data.
+        batch_size (int): Number of samples per batch.
+        model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
+
+    Returns:
+        dict: Dictionary with keys 'train', 'val' and 'test' mapping to their respective DataLoaders.
+    """
+    dataloaders = train_val_dloaders(train_dataset, val_dataset, batch_size, model)
+    dataloaders.update(test_dloaders(test_dataset, batch_size, model))
+    return dataloaders
+
