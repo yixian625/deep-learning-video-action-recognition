@@ -48,7 +48,7 @@ def args_parser():
         
     Arguments include:
         -fd/--frame_dir: Directory for storing video frames.
-        -trs/--train_size: Proportion of data to use for training (default 0.7).
+        -trs/--train_size: Proportion of data to use for training (default 0.8).
         -tss/--test_size: Proportion of data to use for testing (default 0.1).
         -fpv/--fr_per_vid: Number of frames per video to consider (default 16).
         -nc/--n_classes: Number of classes for the classification task (required).
@@ -68,7 +68,7 @@ def args_parser():
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
     parser.add_argument('-fd', '--frame_dir', help='Directory for storing video frames')
-    parser.add_argument('-trs', '--train_size', type=float, default=0.7, help='Train set size')
+    parser.add_argument('-trs', '--train_size', type=float, default=0.8, help='Train set size')
     parser.add_argument('-tss', '--test_size', type=float, default=0.1, help='Test set size')
     parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)

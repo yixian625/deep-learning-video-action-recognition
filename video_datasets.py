@@ -16,10 +16,11 @@ from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 
 import os
+import re
 import glob
 from tqdm import tqdm
 import numpy as np
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedGroupKFold
 
 
 class VideoDataset(Dataset):
@@ -102,19 +103,41 @@ def load_dataset(frame_dir):
     return vid_dataset, label_dict
 
 
+def get_video_group(vid_path):
+    """
+    Return the source-video group ID of a clip.
+
+    UCF50 clips are named v_<class>_g<group>_c<clip>; all clips sharing a group within a class
+    are cut from the same source video (same actor and scene). Clips that do not follow this
+    naming scheme are treated as their own group.
+
+    Args:
+        vid_path (str): Path to the video (frame) directory.
+
+    Returns:
+        str: Group ID of the form <class>_g<group>.
+    """
+    vid_cat = os.path.basename(os.path.dirname(vid_path))
+    vid_name = os.path.basename(vid_path)
+    match = re.search(r'_g(\d+)_c\d+$', vid_name)
+    return '{}_g{}'.format(vid_cat, match.group(1)) if match else os.path.join(vid_cat, vid_name)
+
+
 def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
     """
-    Split the dataset into training, validation, and test sets using stratified sampling.
-    
-    This function uses StratifiedShuffleSplit to ensure that each split has a representative
-    distribution of classes.
-    
+    Split the dataset into training, validation, and test sets using stratified group sampling.
+
+    This function uses StratifiedGroupKFold so that each split has a representative distribution
+    of classes, while all clips from the same source video (see get_video_group) are kept in the
+    same split. This prevents near-duplicate clips from leaking between train, validation and test.
+    Because whole groups are assigned, the resulting ratios are approximate.
+
     Args:
         vid_dataset (dict): Dictionary mapping video paths to labels.
         tr_ratio (float): Proportion of the data to use for training.
         ts_ratio (float): Proportion of the data to use for testing.
         seed (int, optional): Random seed for reproducibility. Default is 0.
-    
+
     Returns:
         tuple: (tr_dataset, val_dataset, ts_dataset)
             - tr_dataset (list): List of (video_path, label) tuples for the training set.
@@ -123,24 +146,22 @@ def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
     """
     vid_paths = np.array([vid_path for vid_path in vid_dataset.keys()])
     vid_labels = np.array([vid_label for vid_label in vid_dataset.values()])
+    vid_groups = np.array([get_video_group(vid_path) for vid_path in vid_paths])
     print('Splitting train/validation/test datasets....')
 
-    # Test split using StratifiedShuffleSplit
-    ts_spliter = StratifiedShuffleSplit(n_splits=1, test_size=ts_ratio, random_state=seed)
-    for tr_val_idx, ts_idx in ts_spliter.split(vid_paths, vid_labels):
-        ts_paths, ts_labels = vid_paths[ts_idx], vid_labels[ts_idx]
-        tr_val_paths, tr_val_labels = vid_paths[tr_val_idx], vid_labels[tr_val_idx]
-    ts_dataset = [(ts_path, ts_label) for ts_path, ts_label in zip(ts_paths, ts_labels)]
+    # Test split: hold out one of round(1 / ts_ratio) stratified group folds
+    ts_spliter = StratifiedGroupKFold(n_splits=round(1 / ts_ratio), shuffle=True, random_state=seed)
+    tr_val_idx, ts_idx = next(ts_spliter.split(vid_paths, vid_labels, vid_groups))
+    ts_dataset = [(ts_path, ts_label) for ts_path, ts_label in zip(vid_paths[ts_idx], vid_labels[ts_idx])]
+    tr_val_paths, tr_val_labels, tr_val_groups = vid_paths[tr_val_idx], vid_labels[tr_val_idx], vid_groups[tr_val_idx]
 
-    # Train/validation split
+    # Train/validation split on the remaining groups
     val_ratio = 1 - tr_ratio - ts_ratio
     val_wt = val_ratio / (tr_ratio + val_ratio)
-    val_spliter = StratifiedShuffleSplit(n_splits=1, test_size=val_wt, random_state=seed)
-    for tr_idx, val_idx in val_spliter.split(tr_val_paths, tr_val_labels):
-        tr_paths, tr_labels = tr_val_paths[tr_idx], tr_val_labels[tr_idx]
-        val_paths, val_labels = tr_val_paths[val_idx], tr_val_labels[val_idx]
-    tr_dataset = [(tr_path, tr_label) for tr_path, tr_label in zip(tr_paths, tr_labels)]
-    val_dataset = [(val_path, val_label) for val_path, val_label in zip(val_paths, val_labels)]
+    val_spliter = StratifiedGroupKFold(n_splits=round(1 / val_wt), shuffle=True, random_state=seed)
+    tr_idx, val_idx = next(val_spliter.split(tr_val_paths, tr_val_labels, tr_val_groups))
+    tr_dataset = [(tr_path, tr_label) for tr_path, tr_label in zip(tr_val_paths[tr_idx], tr_val_labels[tr_idx])]
+    val_dataset = [(val_path, val_label) for val_path, val_label in zip(tr_val_paths[val_idx], tr_val_labels[val_idx])]
 
     return tr_dataset, val_dataset, ts_dataset
 
