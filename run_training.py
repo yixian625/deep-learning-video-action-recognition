@@ -16,7 +16,7 @@ hyperparameters. The module performs the following steps:
 Usage:
     Run the script from the command line with the required arguments. For example:
     
-        python trainer.py -fd /path/to/frames -nc 51 -bs 8
+        python trainer.py -fd /path/to/frames -nc 50 -bs 8
         
 Arguments include:
     -fd/--frame_dir: Directory where video frames are stored (required).
@@ -157,7 +157,7 @@ def trainer(args):
     # Define the loss function, optimizer, and learning rate scheduler
     loss_func = nn.CrossEntropyLoss(reduction='sum')
     opt = optim.Adam(model.parameters(), lr=learning_rate)
-    lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5, verbose=1)
+    lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
     os.makedirs("./models", exist_ok=True)
     optim_model_dir = './models'
 
