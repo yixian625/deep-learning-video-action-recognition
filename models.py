@@ -89,7 +89,9 @@ class LRCN(nn.Module):
         self.base_model = base_cnn
 
         # Define the LSTM to process the sequence of frame features.
-        self.rnn = nn.LSTM(num_features, hidden_size, n_layers)
+        # batch_first=True: input is (batch_size, time_steps, features), so the LSTM steps over time
+        # within each video instead of over the videos in a batch.
+        self.rnn = nn.LSTM(num_features, hidden_size, n_layers, batch_first=True)
         
         # Define dropout for regularization.
         self.dropout = nn.Dropout(dropout_rate)
@@ -104,9 +106,10 @@ class LRCN(nn.Module):
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
         
-        For each time step (frame), the CNN backbone extracts features. These features are then
-        passed through the LSTM sequentially. The output from the last time step is then passed
-        through dropout and the final fully-connected layer to produce the class logits.
+        The CNN backbone extracts features from all frames at once. The per-video sequences of frame
+        features are then passed through the LSTM, which steps over time independently for each video.
+        The output from the last time step is then passed through dropout and the final fully-connected
+        layer to produce the class logits.
 
         Args:
             x (Tensor): Input tensor of shape (batch_size, time_steps, channels, height, width).
@@ -116,15 +119,12 @@ class LRCN(nn.Module):
         """
         bs, ts, c, h, w = x.shape  # batch_size, time_steps, channels, height, width
         
-        # Process the first frame separately to initialize the LSTM hidden and cell states.
-        idx = 0
-        y = self.base_model(x[:, idx])
-        _, (hn, cn) = self.rnn(y.unsqueeze(1))
-        
-        # Iterate over the remaining frames, feeding each frame's features into the LSTM.
-        for idx in range(1, ts):
-            y = self.base_model(x[:, idx])
-            out, (hn, cn) = self.rnn(y.unsqueeze(1), (hn, cn))
+        # Extract features for every frame of every video in one pass, then restore the time axis.
+        y = self.base_model(x.reshape(bs * ts, c, h, w))
+        y = y.reshape(bs, ts, -1)  # (batch_size, time_steps, features)
+
+        # Run the LSTM over the time steps of each video.
+        out, _ = self.rnn(y)
         
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
