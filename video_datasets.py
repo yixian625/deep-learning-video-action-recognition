@@ -56,8 +56,10 @@ class VideoDataset(Dataset):
             tuple: (frames_tensor, label) where frames_tensor is a tensor of shape (T, C, H, W)
                    with T being the number of frames (up to fr_per_vid) and label is an integer.
         """
-        # Get all JPEG frame paths from the video directory and select up to fr_per_vid frames
+        # Get all JPEG frame paths sorted by frame index (frame0, frame1, ..., frame10, ...)
+        # and select up to fr_per_vid frames
         fr_paths = glob.glob(self.dataset[idx][0] + '/*.jpg')
+        fr_paths = sorted(fr_paths, key=lambda p: int(re.search(r'(\d+)\.jpg$', p).group(1)))
         fr_paths = fr_paths[:self.fpv]
         
         # Open images using PIL

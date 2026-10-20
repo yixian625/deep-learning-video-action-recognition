@@ -1,6 +1,6 @@
-# Video Classification with HMDB51
+# Video Classification with UCF50
 
-This project implements a video classification pipeline using the HMDB51 dataset. It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. The project includes scripts for preprocessing, training, and testing the model.
+This project implements a video classification pipeline using the UCF50 dataset (originally written for HMDB51). It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. The project includes scripts for preprocessing, training, and testing the model.
 
 ---
 
@@ -21,18 +21,21 @@ This project implements a video classification pipeline using the HMDB51 dataset
 ### Step 0: Download and Unzip Dataset
 
 1. **Download Dataset:**  
-   Download the HMDB51 dataset from [Kaggle](https://www.kaggle.com/datasets/easonlll/hmdb51). This dataset contains videos of 51 different human action classes.
+   Download the UCF50 dataset (`UCF50.rar`) from [UCF CRCV](https://www.crcv.ucf.edu/data/UCF50.php). It contains 6,681 videos of 50 human action classes.
 
 2. **Unzip and Organize:**  
-   Unzip the downloaded dataset. The expected folder structure should be as follows:
+   Extract the archive into the `data/` folder (which is git-ignored). The expected folder structure is:
    
-        - HMDB51
-            - Action_Class1
-            - Action_Class2
-            ... ... ... ...
-            - Action_Class51
+        - data
+            - UCF50
+                - BaseballPitch
+                    - v_BaseballPitch_g01_c01.avi
+                    - ...
+                - Basketball
+                ... ... ... ...
+                - YoYo
 
-Each subdirectory represents a different action class.
+Each subdirectory represents a different action class. Videos are named `v_<class>_g<group>_c<clip>.avi`: every class has 25+ groups, and all clips in a group are cut from the same source video (same actor and scene).
 
 ---
 
@@ -46,6 +49,7 @@ Install the required Python packages by running:
 
 ```bash
 pip install -r requirements.txt
+```
 
 # Key Libraries
 
@@ -75,7 +79,21 @@ Before training, the raw video files must be converted into frame sequences. The
 
 - The `store_frames` function writes the extracted frames as JPEG images.
 
-Integrate these functions into a preprocessing script (e.g., `preprocess.py`) to convert all videos into folders of extracted frames. The resulting folder structure should mirror the original dataset structure:
+`preprocess.py` uses these functions to convert every video into a folder of extracted frames:
+
+```bash
+python preprocess.py --video_dir data/UCF50 --frame_dir data/UCF50_frames --n_frames 16
+```
+
+The resulting folder structure mirrors the original dataset structure:
+
+        - data
+            - UCF50_frames
+                - BaseballPitch
+                    - v_BaseballPitch_g01_c01
+                        - frame0.jpg
+                        - frame1.jpg
+                        - ...
 
 
 ---
@@ -95,11 +113,12 @@ Execute the training script from your terminal:
 
 ```bash
 bash train.sh
+```
 
 ## During Training, the Script Will:
 
 - **Load the frame dataset.**
-- **Split the dataset** into training, validation, and test sets using stratified sampling.
+- **Split the dataset** into training, validation, and test sets (80/10/10 by default) using stratified group sampling, so all clips from the same source video stay in the same split.
 - **Apply data augmentation** techniques (resizing, random flips, affine transformations).
 - **Create custom PyTorch Datasets and DataLoaders.**
 - **Initialize the LRCN model** using a specified ResNet backbone.
@@ -120,6 +139,8 @@ bash train.sh
   
 ```bash
 bash test.sh
+```
+
 ## Testing Script Overview
 
 The testing script will:
@@ -158,7 +179,7 @@ By tweaking these parameters, you can study their impact on model performance an
 ## Summary of Steps
 
 - **Step 0: Dataset Preparation**  
-  Download, unzip, and organize the HMDB51 dataset into subdirectories by action class.
+  Download UCF50, extract it to `data/UCF50`, and run `preprocess.py` to extract frames into `data/UCF50_frames`.
 
 - **Step 1: Run Training**  
   Execute `train.sh` after configuring the `--frame_dir` and other hyperparameters to train the model.
@@ -167,3 +188,17 @@ By tweaking these parameters, you can study their impact on model performance an
   Execute `test.sh` after updating the `--ckpt` argument to point to the best model checkpoint to evaluate the model.
 
 Happy Training!
+
+---
+
+## Issues in Original Implementation
+
+1. **Data leak in train/val/test split:** `dataset_split` in `video_datasets.py` stratifies at the clip level. HMDB51 cuts several clips from each source video (e.g. `..._goo_0`, `..._goo_1`), so clips of the same actor and scene can end up in both train and val/test. This inflates validation and test accuracy. The fix is to use the official HMDB51 split files, or to split by source-video group (e.g. `GroupShuffleSplit`).
+2. **Frames not loaded in temporal order:** `VideoDataset.__getitem__` uses unsorted `glob`, and the names `frame0.jpg ... frame16.jpg` sort as strings (`frame10` comes before `frame2`). The LSTM therefore sees frames in a scrambled order. The fix is to sort frame paths by their numeric index.
+
+---
+
+## Fixes
+
+1. **Data leak in train/val/test split (fixed):** `dataset_split` now uses `StratifiedGroupKFold`. `get_video_group` gives every clip a group ID of the form `<class>_g<group>`, taken from its UCF50 name, and the split assigns each group whole to train, val, or test while keeping the class balance. With the default 80/10/10 split, no group or clip appears in more than one split, and all 50 classes appear in each. Because whole groups are assigned, the per-class ratios are approximate. Expect lower (but honest) accuracy than with the clip-level split.
+2. **Frames not loaded in temporal order (fixed):** `VideoDataset.__getitem__` now sorts frame paths by their numeric index (`frame0, frame1, ..., frame9, frame10, ...`) before taking the first `fr_per_vid` frames.
