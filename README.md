@@ -1,6 +1,6 @@
 # Video Classification with UCF50
 
-This project implements a video classification pipeline using the UCF50 dataset (originally written for HMDB51). It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. The project includes scripts for preprocessing, training, and testing the model.
+This project implements a video classification pipeline using the UCF50 dataset (originally written for HMDB51). It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. It also supports an S3D 3D CNN pretrained on Kinetics-400 (see [3D CNN (S3D)](#3d-cnn-s3d)). The project includes scripts for preprocessing, training, and testing the models.
 
 ---
 
@@ -11,6 +11,7 @@ This project implements a video classification pipeline using the UCF50 dataset 
 - [Preprocessing and Frame Extraction](#preprocessing-and-frame-extraction)
 - [Training the Model](#training-the-model)
 - [Testing and Evaluation](#testing-and-evaluation)
+- [3D CNN (S3D)](#3d-cnn-s3d)
 - [Project Structure](#project-structure)
 - [Customization and Hyperparameters](#customization-and-hyperparameters)
 
@@ -123,7 +124,7 @@ bash train.sh
 - **Create custom PyTorch Datasets and DataLoaders.**
 - **Initialize the LRCN model** using a specified ResNet backbone.
 - **Set up the loss function, optimizer, and learning rate scheduler.**
-- **Run the training loop** while tracking loss and accuracy, saving the best model weights.
+- **Run the training loop** while tracking loss and accuracy, saving the best model weights and the dataset splits to `models/<model_type>/` (override with `--output_dir`).
 
 ---
 
@@ -132,7 +133,7 @@ bash train.sh
 ### Step 2: Run Testing
 
 - **Configure Testing Parameters:**  
-  Update the `--ckpt` argument in your testing script (e.g., `test.sh`) to point to the saved best model weights generated during training.
+  Update the `--ckpt` argument in your testing script (e.g., `test.sh`) to point to the saved best model weights generated during training (by default `models/lrcn/best_model_wts.pt`). The splits are loaded from the same folder.
 
 - **Run the Testing Script:**  
   Execute the testing script from your terminal:
@@ -149,6 +150,39 @@ The testing script will:
 - **Create a DataLoader for the test set.**
 - **Load the trained model checkpoint.**
 - **Evaluate the model** on the test data by computing overall accuracy, generating classification reports, and optionally producing confusion matrices.
+- **Save per-video class probabilities** to `test_predictions.npz` next to the checkpoint (see [Two-stream extension](#two-stream-extension)).
+
+---
+
+## 3D CNN (S3D)
+
+S3D is a separable 3D CNN from the I3D family, built from torchvision with Kinetics-400 pretrained weights (`s3d-d76dad2f.pth`, 32 MB, downloaded automatically from `download.pytorch.org` on the first run). Unlike LRCN, it takes a short clip of nearby frames instead of frames spread over the whole video.
+
+1. **Extract dense clips** of 32 consecutive frames, taking every 2nd frame from the middle of each video. This is about 12.5-15 fps, close to S3D's 15 fps pretraining, and takes about 4.7 GB. Videos shorter than 63 frames are padded by repeating their last frame.
+
+   ```bash
+   python preprocess.py --video_dir data/UCF50 --frame_dir data/UCF50_clips --n_frames 32 --sampling dense --stride 2
+   ```
+
+2. **Train and evaluate:**
+
+   ```bash
+   bash train_s3d.sh
+   bash test_s3d.sh
+   ```
+
+   These use `--model_type s3d --fr_per_vid 32 --batch_size 8 --amp --num_workers 6`. With mixed precision (`--amp`), a batch of 8 clips at 224x224 uses about 4.4 GB of GPU memory.
+
+**Clip-level augmentation:** `ClipDataset` applies `compose_clip_transforms` (resize to 256x256, random 224x224 crop, horizontal flip) to the whole clip at once. Every frame of a clip gets the same crop and flip, which keeps the motion between frames intact.
+
+### Two-stream extension
+
+The pipeline is set up so that an optical-flow stream can be added and late-fused with S3D:
+
+- **Flow source frames:** compute flow from the frames in `data/UCF50_clips`, so the flow is temporally aligned with the RGB clips.
+- **Flow dataset:** subclass `ClipDataset` and override `load_clip` to load the flow images for the same video directory names. A horizontal flip must also negate the x component of the flow.
+- **Flow model and training:** add the flow model to `models.build_model`, and train it with `run.py` and its own `--output_dir`. Because the split is computed from the video names, both streams get the same train/val/test split.
+- **Fusion:** each eval run writes `test_predictions.npz` (`video_keys`, `labels`, `probs`) next to its checkpoint. Late fusion averages the `probs` of the two streams per `video_key`, so each stream's accuracy and the fused accuracy can be compared.
 
 ---
 
@@ -163,13 +197,14 @@ You can modify several parameters to experiment with different settings:
 
 ### Model Parameters
 
-- `--model_type`: Choose between `'lrcn'` (default) or other supported models.
+- `--model_type`: Choose between `'lrcn'` (default) and `'s3d'`.
 - `--cnn_backbone`: Options include `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152`.
 - `--rnn_hidden_size` and `--rnn_n_layers`: Configure the LSTM network.
 
 ### Training Parameters
 
 - `--batch_size`, `--learning_rate`, `--n_epochs`, and `--dropout` control the training dynamics.
+- `--amp` enables mixed precision and `--num_workers` sets the number of DataLoader worker processes.
 - `--train_size` and `--test_size` determine dataset splits.
 
 By tweaking these parameters, you can study their impact on model performance and experiment with different network configurations.

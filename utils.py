@@ -4,9 +4,10 @@ Module: utils.py
 This module provides helper functions for video processing and data transformations 
 for video classification tasks. It includes functions for:
     - Uniformly sampling frames from videos.
+    - Sampling a clip of consecutive (strided) frames from videos, for 3D CNNs.
     - Storing extracted frames as JPEG images.
     - Retrieving image transformation statistics based on the model type.
-    - Composing data transforms for training and validation/test datasets.
+    - Composing per-frame (LRCN) and clip-level (3D CNN) data transforms for training and validation/test datasets.
     - Creating DataLoaders for training, validation, and testing, using custom collate functions.
 """
 
@@ -14,7 +15,9 @@ import os
 import cv2
 import numpy as np
 
+import torch
 from torchvision import transforms as transforms
+from torchvision.transforms import v2
 from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
 
@@ -58,6 +61,57 @@ def get_frames(vid, n_frames=1):
     return frames, v_len
 
 
+def get_clip_frames(vid, n_frames=32, stride=2):
+    """
+    Sample a clip of n_frames frames taken every `stride` frames from the middle of a video.
+
+    Unlike get_frames, which spreads frames over the whole video, this keeps the frames close
+    together in time, which is what 3D CNNs (and optical flow) expect. If the video is too short,
+    the clip is padded by repeating its last frame, so every clip has exactly n_frames frames.
+
+    Args:
+        vid (str): Path to the video file.
+        n_frames (int): Number of frames in the clip.
+        stride (int): Temporal stride between consecutive clip frames.
+
+    Returns:
+        tuple: (frames, v_len)
+            - frames (list): List of n_frames frames (as numpy arrays in RGB format), or an empty
+              list if the video cannot be read.
+            - v_len (int): Total number of frames in the video, as reported by OpenCV.
+    """
+    v_cap = cv2.VideoCapture(vid)
+    if not v_cap.isOpened():
+        print("Failed to open video:", vid)
+        return [], 0
+    v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Center a window of (n_frames - 1) * stride + 1 frames in the video
+    span = (n_frames - 1) * stride + 1
+    start = max(0, (v_len - span) // 2)
+    frame_idx = [start + i * stride for i in range(n_frames)]
+
+    # Read sequentially and keep the frames at frame_idx (seeking is unreliable for some codecs)
+    kept = {}
+    for idx in range(frame_idx[-1] + 1):
+        success, frame = v_cap.read()
+        if not success:
+            break
+        if idx in frame_idx:
+            kept[idx] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    v_cap.release()
+    if not kept:
+        print("No frames found in video:", vid)
+        return [], v_len
+
+    # Pad with the last frame that could be read (short videos / overestimated frame counts)
+    frames, last = [], None
+    for idx in frame_idx:
+        last = kept.get(idx, last)
+        frames.append(last)
+    return frames, v_len
+
+
 def store_frames(frames, store_path):
     """
     Save a list of frames as JPEG images to the specified directory.
@@ -83,11 +137,12 @@ def transform_stats(model='lrcn'):
     """
     Retrieve transformation statistics based on the model type.
 
-    For the 'lrcn' model, images are resized to 224x224; for '3dcnn', images are resized to 112x112.
+    For the 'lrcn' model, images are resized to 224x224; for '3dcnn', images are resized to 112x112;
+    for 's3d', clips are cropped to 224x224 (matching its Kinetics-400 pretraining).
     Also returns the mean and standard deviation values used for normalization.
 
     Args:
-        model (str): Type of model ('lrcn' or '3dcnn').
+        model (str): Type of model ('lrcn', '3dcnn' or 's3d').
 
     Returns:
         tuple: (h, w, mean, std)
@@ -105,6 +160,10 @@ def transform_stats(model='lrcn'):
         std = [0.229, 0.224, 0.225]
     elif model == '3dcnn':
         h, w = 112, 112
+        mean = [0.43216, 0.394666, 0.37645]
+        std = [0.22803, 0.22145, 0.216989]
+    elif model == 's3d':
+        h, w = 224, 224
         mean = [0.43216, 0.394666, 0.37645]
         std = [0.22803, 0.22145, 0.216989]
     else:
@@ -145,7 +204,43 @@ def compose_data_transforms(height, width, mean, std):
     return train_transforms, val_test_transforms
 
 
-def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn'):
+def compose_clip_transforms(height, width, mean, std, resize=(256, 256)):
+    """
+    Compose and return clip-level data transforms for 3D CNNs (e.g., S3D).
+
+    The transforms operate on a whole clip (a uint8 video tensor of shape (T, C, H, W)), so every
+    random parameter (crop position, flip) is drawn once per clip and applied identically to all of
+    its frames. This keeps the motion between frames intact, which per-frame transforms would break.
+
+    Args:
+        height (int): Crop height.
+        width (int): Crop width.
+        mean (list): Mean values for normalization.
+        std (list): Standard deviation values for normalization.
+        resize (tuple, optional): Size each frame is resized to before cropping. Default is (256, 256).
+
+    Returns:
+        tuple: (train_transforms, val_test_transforms)
+            - train_transforms: Random crop and horizontal flip, then normalization.
+            - val_test_transforms: Center crop, then normalization.
+    """
+    train_transforms = v2.Compose([
+        v2.Resize(resize, antialias=True),
+        v2.RandomCrop((height, width)),
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean, std),
+    ])
+    val_test_transforms = v2.Compose([
+        v2.Resize(resize, antialias=True),
+        v2.CenterCrop((height, width)),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean, std),
+    ])
+    return train_transforms, val_test_transforms
+
+
+def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn', num_workers=0):
     """
     Create DataLoaders for training and validation datasets.
 
@@ -158,25 +253,21 @@ def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn'):
         val_dataset (Dataset): PyTorch Dataset for validation data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
+        num_workers (int, optional): Number of DataLoader worker processes. Default is 0 (load in the main process).
 
     Returns:
         dict: Dictionary with keys 'train' and 'val' mapping to their respective DataLoaders.
     """
-    if model == "lrcn":
-        train_dl = DataLoader(train_dataset, batch_size=batch_size,
-                              shuffle=True, collate_fn=collate_fn_rnn)
-        val_dl = DataLoader(val_dataset, batch_size=2 * batch_size,
-                            shuffle=False, collate_fn=collate_fn_rnn)
-    else:
-        train_dl = DataLoader(train_dataset, batch_size=batch_size,
-                              shuffle=True, collate_fn=collate_fn_r3d_18)
-        val_dl = DataLoader(val_dataset, batch_size=2 * batch_size,
-                            shuffle=False, collate_fn=collate_fn_r3d_18)
+    collate_fn = collate_fn_rnn if model == "lrcn" else collate_fn_r3d_18
+    train_dl = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                          collate_fn=collate_fn, num_workers=num_workers)
+    val_dl = DataLoader(val_dataset, batch_size=2 * batch_size, shuffle=False,
+                        collate_fn=collate_fn, num_workers=num_workers)
     dataloaders = {'train': train_dl, 'val': val_dl}
     return dataloaders
 
 
-def test_dloaders(test_dataset, batch_size, model='lrcn'):
+def test_dloaders(test_dataset, batch_size, model='lrcn', num_workers=0):
     """
     Create a DataLoader for the test dataset.
 
@@ -187,21 +278,19 @@ def test_dloaders(test_dataset, batch_size, model='lrcn'):
         test_dataset (Dataset): PyTorch Dataset for test data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
+        num_workers (int, optional): Number of DataLoader worker processes. Default is 0 (load in the main process).
 
     Returns:
         dict: Dictionary with key 'test' mapping to the test DataLoader.
     """
-    if model == "lrcn":
-        test_dl = DataLoader(test_dataset, batch_size=2 * batch_size,
-                             shuffle=False, collate_fn=collate_fn_rnn)
-    else:
-        test_dl = DataLoader(test_dataset, batch_size=2 * batch_size,
-                             shuffle=False, collate_fn=collate_fn_r3d_18)
+    collate_fn = collate_fn_rnn if model == "lrcn" else collate_fn_r3d_18
+    test_dl = DataLoader(test_dataset, batch_size=2 * batch_size, shuffle=False,
+                         collate_fn=collate_fn, num_workers=num_workers)
     dataloaders = {'test': test_dl}
     return dataloaders
 
 
-def compose_dataloaders(train_dataset, val_dataset, test_dataset, batch_size, model='lrcn'):
+def compose_dataloaders(train_dataset, val_dataset, test_dataset, batch_size, model='lrcn', num_workers=0):
     """
     Create DataLoaders for training, validation, and test datasets.
 
@@ -214,11 +303,12 @@ def compose_dataloaders(train_dataset, val_dataset, test_dataset, batch_size, mo
         test_dataset (Dataset): PyTorch Dataset for test data.
         batch_size (int): Number of samples per batch.
         model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
+        num_workers (int, optional): Number of DataLoader worker processes. Default is 0 (load in the main process).
 
     Returns:
         dict: Dictionary with keys 'train', 'val' and 'test' mapping to their respective DataLoaders.
     """
-    dataloaders = train_val_dloaders(train_dataset, val_dataset, batch_size, model)
-    dataloaders.update(test_dloaders(test_dataset, batch_size, model))
+    dataloaders = train_val_dloaders(train_dataset, val_dataset, batch_size, model, num_workers)
+    dataloaders.update(test_dloaders(test_dataset, batch_size, model, num_workers))
     return dataloaders
 

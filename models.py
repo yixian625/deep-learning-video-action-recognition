@@ -6,15 +6,22 @@ classification. The LRCN model combines a 2D CNN backbone (e.g., ResNet) for spa
 extraction from individual frames with an LSTM to capture temporal dynamics across frames.
 An additional fully-connected layer is used to output the final class predictions.
 
+It also provides an S3D 3D CNN (pretrained on Kinetics-400) and a factory to build either model.
+
 Classes:
     Identity: A helper module that returns the input unchanged. It is used to replace the fully-connected
               layer of the ResNet backbone.
     LRCN: The main model that integrates the CNN backbone, an LSTM, dropout regularization, and a final
           fully-connected layer to produce class logits.
+
+Functions:
+    build_s3d: Builds an S3D model with a new classification layer.
+    build_model: Builds the model selected by model_type ('lrcn' or 's3d').
 """
 
 import torch.nn as nn
 from torchvision import models
+from torchvision.models.video import s3d, S3D_Weights
 
 class Identity(nn.Module):
     """
@@ -132,3 +139,53 @@ class LRCN(nn.Module):
         # Pass the final output through the fully-connected layer to get class logits.
         out = self.fc(out)
         return out
+
+
+def build_s3d(n_classes, pretrained=True, dropout_rate=0.2):
+    """
+    Build an S3D model for video classification.
+
+    S3D (separable 3D CNN, an Inception-based successor of I3D) takes clips of shape
+    (batch_size, channels, time_steps, height, width). With pretrained=True, it is initialized
+    from Kinetics-400 weights and its final 1x1x1 convolution is replaced to output n_classes logits.
+
+    Args:
+        n_classes (int): Number of output classes.
+        pretrained (bool, optional): If True, loads Kinetics-400 pretrained weights. Default is True.
+        dropout_rate (float, optional): Dropout rate before the classification layer. Default is 0.2.
+
+    Returns:
+        nn.Module: The S3D model.
+    """
+    model = s3d(weights=S3D_Weights.KINETICS400_V1 if pretrained else None)
+    model.classifier[0] = nn.Dropout(p=dropout_rate)
+    model.classifier[1] = nn.Conv3d(model.classifier[1].in_channels, n_classes, kernel_size=1, stride=1, bias=True)
+    return model
+
+
+def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
+                rnn_hidden_size=100, rnn_n_layers=1, cnn_backbone='resnet34'):
+    """
+    Build the video classification model selected by model_type.
+
+    Args:
+        model_type (str): 'lrcn' (2D CNN + LSTM) or 's3d' (3D CNN).
+        n_classes (int): Number of output classes.
+        pretrained (bool, optional): Use pretrained weights (ImageNet for LRCN, Kinetics-400 for S3D). Default is True.
+        dropout_rate (float, optional): Dropout rate before the classification layer. Default is 0.1.
+        rnn_hidden_size (int, optional): LRCN only: number of neurons in the LSTM hidden layer. Default is 100.
+        rnn_n_layers (int, optional): LRCN only: number of LSTM layers. Default is 1.
+        cnn_backbone (str, optional): LRCN only: ResNet backbone. Default is 'resnet34'.
+
+    Returns:
+        nn.Module: The model.
+
+    Raises:
+        ValueError: If model_type is not supported.
+    """
+    if model_type == 'lrcn':
+        return LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout_rate,
+                    n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
+    if model_type == 's3d':
+        return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate)
+    raise ValueError('model_type must be either "lrcn" or "s3d".')

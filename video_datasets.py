@@ -3,14 +3,17 @@ Module: video_datasets.py
 
 This module provides classes and functions for loading and processing video datasets,
 splitting them into training, validation, and test sets, and preparing data for video
-classification models. It includes a custom PyTorch Dataset for videos stored as directories
-of frame images, functions to load the dataset from a directory structure, split the dataset
-using stratified sampling, and custom collate functions for handling variable-length video sequences.
+classification models. It includes custom PyTorch Datasets for videos stored as directories
+of frame images (per-frame transforms for LRCN, clip-level transforms for 3D CNNs), functions to
+load the dataset from a directory structure, split the dataset using stratified group sampling,
+and custom collate functions for handling variable-length video sequences.
 """
 
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms as transforms
+from torchvision import tv_tensors
+from torchvision.io import read_image, ImageReadMode
 from torch.nn.utils.rnn import pad_sequence
 
 from PIL import Image
@@ -21,6 +24,23 @@ import glob
 from tqdm import tqdm
 import numpy as np
 from sklearn.model_selection import StratifiedGroupKFold
+
+
+def sorted_frame_paths(vid_dir):
+    """
+    Return the JPEG frame paths of a video directory sorted by frame index.
+
+    Frames are named frame0.jpg, frame1.jpg, ...; sorting numerically keeps frame10 after frame9
+    (plain string sorting would put it right after frame1).
+
+    Args:
+        vid_dir (str): Path to the video (frame) directory.
+
+    Returns:
+        list: Frame paths in temporal order.
+    """
+    fr_paths = glob.glob(vid_dir + '/*.jpg')
+    return sorted(fr_paths, key=lambda p: int(re.search(r'(\d+)\.jpg$', p).group(1)))
 
 
 class VideoDataset(Dataset):
@@ -58,16 +78,15 @@ class VideoDataset(Dataset):
         """
         # Get all JPEG frame paths sorted by frame index (frame0, frame1, ..., frame10, ...)
         # and select up to fr_per_vid frames
-        fr_paths = glob.glob(self.dataset[idx][0] + '/*.jpg')
-        fr_paths = sorted(fr_paths, key=lambda p: int(re.search(r'(\d+)\.jpg$', p).group(1)))
+        fr_paths = sorted_frame_paths(self.dataset[idx][0])
         fr_paths = fr_paths[:self.fpv]
         
         # Open images using PIL
         fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
-        
+
         # Get the label associated with the video
         fr_label = self.dataset[idx][1]
-        
+
         # Apply transforms to each frame if provided, else keep original images
         fr_imgs_trans = [self.transforms(fr_img) for fr_img in fr_imgs] if self.transforms else fr_imgs
 
@@ -76,6 +95,68 @@ class VideoDataset(Dataset):
             fr_imgs_trans = torch.stack(fr_imgs_trans)
 
         return fr_imgs_trans, fr_label
+
+
+class ClipDataset(Dataset):
+    """
+    PyTorch Dataset class for loading fixed-length clips for 3D CNNs (e.g., S3D).
+
+    Each video is a directory of JPEG frames (e.g., created by preprocess.py with --sampling dense).
+    The first n_frames frames are loaded in temporal order and padded by repeating the last frame
+    if the video has fewer. Unlike VideoDataset, transforms are applied to the whole clip at once
+    (see utils.compose_clip_transforms), so random augmentations are identical for all frames.
+
+    To add another input modality for the same videos (e.g., optical flow for a two-stream model),
+    subclass this and override load_clip. Keep the same video keys so that predictions of the
+    two streams can be matched per video. Note that for optical flow a horizontal flip must also
+    negate the x component of the flow.
+
+    Args:
+        vid_dataset (list): List of (video_directory_path, label) tuples.
+        n_frames (int): Number of frames per clip.
+        transforms (callable, optional): Clip-level transform applied to a uint8 video tensor of shape (T, C, H, W).
+    """
+    def __init__(self, vid_dataset, n_frames, transforms=None):
+        self.dataset = vid_dataset
+        self.n_frames = n_frames
+        self.transforms = transforms
+
+    def __len__(self):
+        """Return the number of video samples in the dataset."""
+        return len(self.dataset)
+
+    def load_clip(self, vid_dir):
+        """
+        Load the clip of a video as a uint8 video tensor of shape (n_frames, C, H, W).
+
+        Args:
+            vid_dir (str): Path to the video (frame) directory.
+
+        Returns:
+            tv_tensors.Video: The clip.
+        """
+        fr_paths = sorted_frame_paths(vid_dir)[:self.n_frames]
+        if not fr_paths:
+            raise RuntimeError('No frames found in {}'.format(vid_dir))
+        frames = [read_image(fr_path, mode=ImageReadMode.RGB) for fr_path in fr_paths]
+        frames += [frames[-1]] * (self.n_frames - len(frames))
+        return tv_tensors.Video(torch.stack(frames))
+
+    def __getitem__(self, idx):
+        """
+        Load the clip for the given index, apply the clip-level transforms, and return it with its label.
+
+        Args:
+            idx (int): Index of the sample.
+
+        Returns:
+            tuple: (clip, label) where clip is a tensor of shape (T, C, H, W) and label is an integer.
+        """
+        vid_dir, label = self.dataset[idx]
+        clip = self.load_clip(vid_dir)
+        if self.transforms:
+            clip = self.transforms(clip)
+        return clip.as_subclass(torch.Tensor), label
 
 
 def load_dataset(frame_dir):

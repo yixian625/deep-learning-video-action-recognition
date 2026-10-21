@@ -10,14 +10,15 @@ the following:
     - Loads the dataset from a directory structure.
     - Splits the dataset into training, validation, and test sets.
     - Creates PyTorch Datasets and DataLoaders for training and validation.
-    - Initializes the model (e.g., LRCN) and defines the loss function, optimizer, and learning rate scheduler.
-    - Runs the training loop and saves the best model weights.
+    - Initializes the model (LRCN or S3D) and defines the loss function, optimizer, and learning rate scheduler.
+    - Runs the training loop and saves the best model weights and the splits to the output directory.
 
 - Eval mode:
-    - Loads the pre-generated dataset splits.
+    - Loads the dataset splits saved next to the checkpoint.
     - Creates a DataLoader for the test set.
     - Loads the trained model checkpoint.
-    - Evaluates the model on the test set and prints overall test accuracy.
+    - Evaluates the model on the test set, prints overall test accuracy, and saves the per-video
+      class probabilities (test_predictions.npz) next to the checkpoint, e.g. for two-stream late fusion.
     
 The module also includes a helper function for parsing command-line arguments.
 """
@@ -33,9 +34,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 import numpy as np
 import wandb
 
-from video_datasets import VideoDataset, load_dataset, dataset_split
-from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
-from models import LRCN
+from video_datasets import VideoDataset, ClipDataset, load_dataset, dataset_split
+from utils import transform_stats, compose_data_transforms, compose_clip_transforms, train_val_dloaders, test_dloaders
+from models import build_model
 from train import train
 from test import test, get_test_report, get_confusion_matrix
 
@@ -50,12 +51,12 @@ def args_parser():
         -fd/--frame_dir: Directory for storing video frames.
         -trs/--train_size: Proportion of data to use for training (default 0.8).
         -tss/--test_size: Proportion of data to use for testing (default 0.1).
-        -fpv/--fr_per_vid: Number of frames per video to consider (default 16).
+        -fpv/--fr_per_vid: Number of frames per video (LRCN) or per clip (S3D) to consider (default 16).
         -nc/--n_classes: Number of classes for the classification task (required).
         -c/--ckpt: Path for loading a trained model checkpoint.
-        -mt/--model_type: Model type, either '3dcnn' or 'lrcn' (default 'lrcn').
+        -mt/--model_type: Model type, either 'lrcn' or 's3d' (default 'lrcn').
         -cnn/--cnn_backbone: Backbone CNN for 2D feature extraction (default 'resnet34').
-        -p/--pretrained: Whether to use a pretrained CNN backbone (default True).
+        -p/--pretrained: Whether to use pretrained weights: ImageNet for LRCN, Kinetics-400 for S3D (default True).
         -rhs/--rnn_hidden_size: Number of neurons in the RNN/LSTM hidden layer (default 100).
         -rnl/--rnn_n_layers: Number of RNN/LSTM layers (default 1).
         -m/--mode: Mode of operation: 'train' or 'eval' (required).
@@ -64,6 +65,9 @@ def args_parser():
         -lr/--learning_rate: Learning rate for training (default 3e-5).
         -ne/--n_epochs: Number of training epochs (default 30).
         -wm/--wandb_mode: Weights & Biases mode: 'online', 'offline' or 'disabled' (default 'online').
+        -od/--output_dir: Directory for the best model weights and splits (default './models/<model_type>').
+        -nw/--num_workers: Number of DataLoader worker processes (default 0).
+        --amp: Use automatic mixed precision on CUDA (default off).
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -74,9 +78,9 @@ def args_parser():
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
 
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
-    parser.add_argument('-mt', '--model_type', help='3D CNN or LRCN', default='lrcn')
+    parser.add_argument('-mt', '--model_type', default='lrcn', choices=['lrcn', 's3d'], help='LRCN (2D CNN + LSTM) or S3D (3D CNN)')
     parser.add_argument('-cnn', '--cnn_backbone', default='resnet34', help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
-    parser.add_argument('-p', '--pretrained', help='Use pretrained 2D CNN backbone', default=True)
+    parser.add_argument('-p', '--pretrained', help='Use pretrained weights (ImageNet for LRCN, Kinetics-400 for S3D)', default=True)
     parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
     parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1, help='Number of RNN/LSTM layers')
 
@@ -87,9 +91,36 @@ def args_parser():
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('-wm', '--wandb_mode', default='online', choices=['online', 'offline', 'disabled'],
                         help='Weights & Biases logging mode')
+    parser.add_argument('-od', '--output_dir', help="Directory for model weights and splits (default './models/<model_type>')")
+    parser.add_argument('-nw', '--num_workers', type=int, default=0, help='Number of DataLoader worker processes')
+    parser.add_argument('--amp', action='store_true', help='Use automatic mixed precision on CUDA')
 
     args = parser.parse_args()
     return args
+
+def build_datasets(model_type, splits, fr_per_vid, transforms):
+    """
+    Create a PyTorch Dataset for each split, using the dataset class that matches the model type.
+
+    LRCN uses VideoDataset (per-frame transforms); 3D CNNs use ClipDataset (clip-level transforms).
+
+    Args:
+        model_type (str): 'lrcn' or 's3d'.
+        splits (list): List of splits, each a list of (video_path, label) tuples.
+        fr_per_vid (int): Number of frames per video / clip.
+        transforms (list): Transform for each split.
+
+    Returns:
+        list: One Dataset per split.
+    """
+    dataset_cls = VideoDataset if model_type == 'lrcn' else ClipDataset
+    return [dataset_cls(split, fr_per_vid, trans) for split, trans in zip(splits, transforms)]
+
+
+def video_key(vid_path):
+    """Return a frame-directory-independent key '<class>/<video>' for a video path."""
+    return '/'.join(os.path.normpath(str(vid_path)).split(os.sep)[-2:])
+
 
 def main(args):
     """
@@ -100,7 +131,7 @@ def main(args):
         - Splits the dataset into training, validation, and test sets.
         - Saves the splits for later use.
         - Creates the training and validation DataLoaders.
-        - Initializes the model (LRCN) with specified hyperparameters.
+        - Initializes the model (LRCN or S3D) with specified hyperparameters.
         - Defines the loss function, optimizer, and learning rate scheduler.
         - Runs the training loop and saves the best model weights.
 
@@ -108,8 +139,9 @@ def main(args):
         - Loads the saved dataset splits.
         - Creates the test DataLoader.
         - Loads the trained model checkpoint.
-        - Evaluates the model on the test set and prints the overall test accuracy.
-    
+        - Evaluates the model on the test set, prints the overall test accuracy, and saves
+          the per-video class probabilities next to the checkpoint.
+
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
     """
@@ -134,62 +166,74 @@ def main(args):
     batch_size = args.batch_size
     n_epochs = args.n_epochs
     learning_rate = args.learning_rate
+    num_workers = args.num_workers
+    amp = args.amp
+    output_dir = args.output_dir or os.path.join('./models', model_type)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Start a Weights & Biases run to track this experiment
-    wandb.init(project='video-action-lrcn', job_type=mode, config=vars(args), mode=args.wandb_mode)
+    wandb.init(project='video-action-lrcn', job_type=mode, config=vars(args), mode=args.wandb_mode,
+               tags=[model_type])
 
     # Load transformation statistics and create data augmentation transforms
+    # (per-frame for LRCN, clip-level for 3D CNNs)
     h, w, mean, std = transform_stats(model_type)
-    tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std)
+    compose_transforms = compose_data_transforms if model_type == 'lrcn' else compose_clip_transforms
+    tr_transforms, val_ts_transforms = compose_transforms(h, w, mean, std)
 
-    # Initialize the model (LRCN)
-    model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
-                 n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
+    # Initialize the model (LRCN or S3D)
+    model = build_model(model_type, n_classes, pretrained=pretrained, dropout_rate=dropout,
+                        rnn_hidden_size=rnn_hidden_size, rnn_n_layers=rnn_n_layers, cnn_backbone=cnn_backbone)
 
     if mode == 'train':
         # Load dataset and split into train/validation/test
         vid_dataset, label_dict = load_dataset(frame_dir)
         tr_split, val_split, ts_split = dataset_split(vid_dataset, tr_size, ts_size)
 
-        # Save the splits for reproducibility and later use in evaluation
+        # Save the splits next to the model weights for reproducibility and later use in evaluation
+        os.makedirs(output_dir, exist_ok=True)
         splits = {'train': np.array(tr_split),
                   'val': np.array(val_split),
                   'test': np.array(ts_split)}
-        np.save('./splits.npy', splits)
+        np.save(os.path.join(output_dir, 'splits.npy'), splits)
 
         # Create PyTorch Datasets and DataLoaders for train and validation
-        tr_dataset = VideoDataset(tr_split, fr_per_vid, tr_transforms)
-        val_dataset = VideoDataset(val_split, fr_per_vid, val_ts_transforms)
-        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type)
+        tr_dataset, val_dataset = build_datasets(model_type, [tr_split, val_split], fr_per_vid,
+                                                 [tr_transforms, val_ts_transforms])
+        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type, num_workers)
 
         # Define the loss function, optimizer, and learning rate scheduler
         loss_func = nn.CrossEntropyLoss(reduction='sum')
         opt = optim.Adam(model.parameters(), lr=learning_rate)
         lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
-        os.makedirs("./models", exist_ok=True)
-        optim_model_dir = './models'
 
         # Main training procedure
         model.to(device)
-        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir, n_epochs)
+        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, output_dir, n_epochs, amp)
 
     elif mode == 'eval':
-        # Load saved dataset splits
-        splits = np.load('./splits.npy', allow_pickle=True)
+        # Load the dataset splits saved next to the checkpoint during training
+        ckpt_dir = os.path.dirname(ckpt)
+        splits = np.load(os.path.join(ckpt_dir, 'splits.npy'), allow_pickle=True)
         ts_split = splits.item()['test']
         ts_split = [(sample[0], int(sample[1])) for sample in ts_split]
 
         # Create PyTorch Dataset and DataLoader for the test set
-        ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
-        dataloaders = test_dloaders(ts_dataset, batch_size, model_type)
+        ts_dataset, = build_datasets(model_type, [ts_split], fr_per_vid, [val_ts_transforms])
+        dataloaders = test_dloaders(ts_dataset, batch_size, model_type, num_workers)
 
         # Load the trained model checkpoint
-        model.load_state_dict(torch.load(args.ckpt))
+        model.load_state_dict(torch.load(ckpt))
         model.to(device)
-        targets, outputs, accuracy = test(model, dataloaders['test'], device)
+        targets, outputs, accuracy, probs = test(model, dataloaders['test'], device, amp)
 
         print('The overall test accuracy is {:.4f}%.'.format(100 * accuracy))
+
+        # Save per-video class probabilities; streams evaluated on the same split can be fused
+        # by averaging their probabilities per video key
+        np.savez(os.path.join(ckpt_dir, 'test_predictions.npz'),
+                 video_keys=np.array([video_key(vid_path) for vid_path, _ in ts_split]),
+                 labels=np.array(targets), probs=probs)
 
         # Recover class names from the saved split paths (<frame_dir>/<class>/<video>)
         labels_dict = {}

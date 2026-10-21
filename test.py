@@ -7,16 +7,17 @@ and compute a multilabel confusion matrix for all classes.
 
 Functions:
     - test: Evaluates the model on a test DataLoader and returns the ground truth labels,
-      predicted labels, and overall accuracy.
+      predicted labels, overall accuracy, and per-sample class probabilities.
     - get_test_report: Generates a classification report using scikit-learn's classification_report.
     - get_confusion_matrix: Computes a multilabel confusion matrix for each class.
 """
 
+import numpy as np
 import torch
 from tqdm import tqdm
 from sklearn.metrics import classification_report, multilabel_confusion_matrix
 
-def test(model, dataloader, device):
+def test(model, dataloader, device, amp=False):
     """
     Evaluate the model on the test dataset and compute overall accuracy.
     
@@ -28,22 +29,28 @@ def test(model, dataloader, device):
         model (torch.nn.Module): The trained video classification model.
         dataloader (torch.utils.data.DataLoader): DataLoader containing the test dataset.
         device (torch.device): The device (CPU or GPU) on which to perform evaluation.
-    
+        amp (bool, optional): Run the forward pass under automatic mixed precision. Default is False.
+
     Returns:
-        tuple: (targets, outputs, accuracy)
+        tuple: (targets, outputs, accuracy, probs)
             - targets (list): Ground truth labels for all samples.
             - outputs (list): Predicted labels for all samples.
             - accuracy (float): Overall accuracy computed as the ratio of correct predictions
                                 to the total number of samples.
+            - probs (np.ndarray): Softmax class probabilities of shape (n_samples, n_classes), in
+                                  dataset order, so that probabilities of several models evaluated on
+                                  the same split can be averaged per video (e.g., two-stream late fusion).
     """
     model.eval()
     with torch.no_grad():
         total_correct_preds = 0.0
         len_dataset = len(dataloader.dataset)
-        targets, outputs = [], []
+        targets, outputs, probs = [], [], []
         for x_batch, y_batch in tqdm(dataloader):
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-            output = model(x_batch)
+            with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
+                output = model(x_batch).float()
+            probs.append(torch.softmax(output, dim=1).cpu().numpy())
             pred = output.argmax(dim=1, keepdim=True)
             correct_preds = pred.eq(y_batch.view_as(pred)).sum().item()
             total_correct_preds += correct_preds
@@ -52,7 +59,7 @@ def test(model, dataloader, device):
         
         accuracy = total_correct_preds / float(len_dataset)
     
-    return targets, outputs, accuracy
+    return targets, outputs, accuracy, np.concatenate(probs)
 
 def get_test_report(target, output, target_names):
     """

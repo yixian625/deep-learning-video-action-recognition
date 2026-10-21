@@ -20,7 +20,7 @@ from tqdm import tqdm
 import torch
 import wandb
 
-def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30):
+def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30, amp=False):
     """
     Train and validate the model over a given number of epochs.
     
@@ -38,6 +38,7 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         device (torch.device): Device (CPU or GPU) on which to perform training.
         optim_model_wts_dir (str): Directory to save the best model weights.
         n_epochs (int, optional): Number of training epochs. Default is 30.
+        amp (bool, optional): Use automatic mixed precision (float16) on CUDA. Default is False.
 
     Returns:
         tuple: (model, loss_hist, acc_hist)
@@ -50,6 +51,7 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_val_acc = 0.0
+    scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
     for epoch in range(n_epochs):
         current_lr = get_learning_rate(optimizer)
@@ -57,14 +59,14 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
 
         # Training phase
         model.train()
-        train_loss, train_accuracy = get_epoch_loss(model, criterion, dataloaders['train'], device, optimizer)
+        train_loss, train_accuracy = get_epoch_loss(model, criterion, dataloaders['train'], device, optimizer, scaler, amp)
         loss_hist['train'].append(train_loss)
         acc_hist['train'].append(train_accuracy)
 
         # Validation phase
         model.eval()
         with torch.no_grad():
-            val_loss, val_accuracy = get_epoch_loss(model, criterion, dataloaders['val'], device)
+            val_loss, val_accuracy = get_epoch_loss(model, criterion, dataloaders['val'], device, amp=amp)
         if val_accuracy > best_val_acc:
             best_val_acc = val_accuracy
             best_model_wts = copy.deepcopy(model.state_dict())
@@ -129,7 +131,7 @@ def batch_correct_preds(output, target):
     correct_preds = pred.eq(target.view_as(pred)).sum().item()
     return correct_preds
 
-def get_batch_loss(criterion, output, target, optimizer=None):
+def get_batch_loss(criterion, output, target, optimizer=None, scaler=None):
     """
     Compute the loss for a mini-batch and perform backpropagation (if optimizer is provided).
     
@@ -138,6 +140,7 @@ def get_batch_loss(criterion, output, target, optimizer=None):
         output (torch.Tensor): Model outputs for the mini-batch.
         target (torch.Tensor): True labels for the mini-batch.
         optimizer (torch.optim.Optimizer, optional): Optimizer to update model weights. If None, no backpropagation is performed.
+        scaler (torch.amp.GradScaler, optional): Gradient scaler for mixed precision training. If None, gradients are not scaled.
     
     Returns:
         tuple: (loss_value, n_batch_correct_preds)
@@ -149,11 +152,16 @@ def get_batch_loss(criterion, output, target, optimizer=None):
         n_batch_correct_preds = batch_correct_preds(output, target)
     if optimizer:
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
     return loss.item(), n_batch_correct_preds
 
-def get_epoch_loss(model, criterion, dataloader, device, optimizer=None):
+def get_epoch_loss(model, criterion, dataloader, device, optimizer=None, scaler=None, amp=False):
     """
     Compute the average loss and overall accuracy for an epoch.
 
@@ -166,6 +174,8 @@ def get_epoch_loss(model, criterion, dataloader, device, optimizer=None):
         dataloader (torch.utils.data.DataLoader): DataLoader for the dataset.
         device (torch.device): Device (CPU or GPU) on which to perform computations.
         optimizer (torch.optim.Optimizer, optional): If provided, used to update model weights during training.
+        scaler (torch.amp.GradScaler, optional): Gradient scaler for mixed precision training.
+        amp (bool, optional): Run the forward pass under automatic mixed precision. Default is False.
 
     Returns:
         tuple: (loss, accuracy)
@@ -177,8 +187,9 @@ def get_epoch_loss(model, criterion, dataloader, device, optimizer=None):
 
     for x_batch, y_batch in tqdm(dataloader):
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-        output = model(x_batch)
-        batch_loss, n_batch_correct_preds = get_batch_loss(criterion, output, y_batch, optimizer)
+        with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
+            output = model(x_batch)
+        batch_loss, n_batch_correct_preds = get_batch_loss(criterion, output.float(), y_batch, optimizer, scaler)
 
         running_loss += batch_loss
         running_total_correct_preds += n_batch_correct_preds
