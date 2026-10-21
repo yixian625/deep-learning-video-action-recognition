@@ -175,6 +175,27 @@ S3D is a separable 3D CNN from the I3D family, built from torchvision with Kinet
 
 **Clip-level augmentation:** `ClipDataset` applies `compose_clip_transforms` (resize to 256x256, random 224x224 crop, horizontal flip) to the whole clip at once. Every frame of a clip gets the same crop and flip, which keeps the motion between frames intact.
 
+### Results
+
+Results are on UCF50 with the group-aware 80/10/10 split (5,343 / 668 / 670 clips), from a single run (`train_s3d.sh`, no fixed seed).
+
+| Hyperparameter | Value |
+|---|---|
+| Model | S3D, Kinetics-400 pretrained, new 50-class 1x1x1 conv head, dropout 0.2 |
+| Input | 32 frames at stride 2, 224x224 crops |
+| Optimizer | Adam, lr 1e-4, no weight decay, cross-entropy (`reduction='sum'`) |
+| LR schedule | `ReduceLROnPlateau` on val loss (factor 0.5, patience 5); lr dropped to 5e-5 after epoch 10 |
+| Batch size / epochs | 8 / 20 (no early stopping), mixed precision |
+| Checkpoint | best val accuracy |
+
+| Metric | Value |
+|---|---|
+| Best val accuracy | 91.8% (epoch 12) |
+| **Test accuracy** | **93.9%** |
+| Test macro F1 | 0.935 |
+
+The weakest test classes are Nunchucks (8/16), Fencing (5/9) and PullUps (8/12). With lr 1e-4, validation accuracy swung between 79% and 88% in epochs 5-10, and the model only improved after the lr dropped to 5e-5. That suggests starting future runs at a lower lr.
+
 ### Two-stream extension
 
 The pipeline is set up so that an optical-flow stream can be added and late-fused with S3D:
