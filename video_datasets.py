@@ -16,8 +16,6 @@ from torchvision import tv_tensors
 from torchvision.io import read_image, ImageReadMode
 from torch.nn.utils.rnn import pad_sequence
 
-from PIL import Image
-
 import os
 import re
 import glob
@@ -53,7 +51,8 @@ class VideoDataset(Dataset):
     Args:
         vid_dataset (dict): Dictionary where keys are video directory paths and values are integer labels.
         fr_per_vid (int): Number of frames per video to load (images are taken in order).
-        transforms (callable, optional): A function/transform to apply to each frame image (e.g., resizing, normalization).
+        transforms (callable, optional): A video-level transform applied to a uint8 video tensor of shape
+            (T, C, H, W) (e.g., resizing, normalization; see utils.compose_data_transforms).
     """
     def __init__(self, vid_dataset, fr_per_vid, transforms=None):
         self.dataset = vid_dataset
@@ -81,20 +80,20 @@ class VideoDataset(Dataset):
         fr_paths = sorted_frame_paths(self.dataset[idx][0])
         fr_paths = fr_paths[:self.fpv]
         
-        # Open images using PIL
-        fr_imgs = [Image.open(fr_path) for fr_path in fr_paths]
-
         # Get the label associated with the video
         fr_label = self.dataset[idx][1]
+        if not fr_paths:
+            return [], fr_label
 
-        # Apply transforms to each frame if provided, else keep original images
-        fr_imgs_trans = [self.transforms(fr_img) for fr_img in fr_imgs] if self.transforms else fr_imgs
+        # Load the frames as one uint8 video tensor of shape (T, C, H, W)
+        fr_imgs = tv_tensors.Video(torch.stack([read_image(fr_path, mode=ImageReadMode.RGB) for fr_path in fr_paths]))
 
-        # Stack transformed images into a tensor if available
-        if len(fr_imgs_trans) > 0:
-            fr_imgs_trans = torch.stack(fr_imgs_trans)
+        # Apply transforms to the whole video at once, so random augmentations (flip, translation)
+        # are identical for all of its frames
+        if self.transforms:
+            fr_imgs = self.transforms(fr_imgs)
 
-        return fr_imgs_trans, fr_label
+        return fr_imgs.as_subclass(torch.Tensor), fr_label
 
 
 class ClipDataset(Dataset):

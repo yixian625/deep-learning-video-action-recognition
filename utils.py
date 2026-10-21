@@ -173,10 +173,12 @@ def transform_stats(model='lrcn'):
 
 def compose_data_transforms(height, width, mean, std):
     """
-    Compose and return data transforms for training and validation/test datasets.
+    Compose and return data transforms for training and validation/test datasets (LRCN).
 
     The training transforms include data augmentation such as random horizontal flipping and random affine transformations,
-    while the validation/test transforms consist solely of resizing, converting to tensor, and normalizing.
+    while the validation/test transforms consist solely of resizing, converting to float, and normalizing.
+    The transforms operate on a whole video (a uint8 video tensor of shape (T, C, H, W)), so every random
+    parameter (flip, translation) is drawn once per video and applied identically to all of its frames.
 
     Args:
         height (int): Desired image height.
@@ -189,17 +191,17 @@ def compose_data_transforms(height, width, mean, std):
             - train_transforms: Composed transforms for the training set.
             - val_test_transforms: Composed transforms for the validation/test set.
     """
-    train_transforms = transforms.Compose([
-        transforms.Resize((height, width)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
+    train_transforms = v2.Compose([
+        v2.Resize((height, width), antialias=True),
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean, std),
     ])
-    val_test_transforms = transforms.Compose([
-        transforms.Resize((height, width)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
+    val_test_transforms = v2.Compose([
+        v2.Resize((height, width), antialias=True),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean, std),
     ])
     return train_transforms, val_test_transforms
 

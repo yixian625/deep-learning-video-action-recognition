@@ -9,7 +9,8 @@ the original implementation used unsorted glob, which yields string order on mos
 import numpy as np
 import pytest
 from PIL import Image
-from torchvision import transforms
+import torch
+from torchvision.transforms import v2
 
 from video_datasets import VideoDataset
 
@@ -29,7 +30,7 @@ def video_dir(tmp_path):
 
 
 def loaded_frame_indices(video_dir, fr_per_vid):
-    dataset = VideoDataset([(video_dir, 0)], fr_per_vid, transforms.ToTensor())
+    dataset = VideoDataset([(video_dir, 0)], fr_per_vid, v2.ToDtype(torch.float32, scale=True))
     frames, label = dataset[0]
     # Decode each frame's index from its mean intensity (JPEG is lossy, so round)
     return [int(round(frame.mean().item() * 255 / STEP)) for frame in frames], label
@@ -47,7 +48,7 @@ def test_fr_per_vid_keeps_the_first_frames_in_time(video_dir):
 
 
 def test_frame_tensor_shape_and_label(video_dir):
-    dataset = VideoDataset([(video_dir, 7)], 16, transforms.ToTensor())
+    dataset = VideoDataset([(video_dir, 7)], 16, v2.ToDtype(torch.float32, scale=True))
     frames, label = dataset[0]
     assert tuple(frames.shape) == (16, 3, 8, 8)
     assert label == 7
