@@ -3,12 +3,14 @@ Module: train.py
 
 This module provides functions to train and evaluate a video classification model.
 It includes the main training loop that tracks loss and accuracy over epochs,
-updates the best performing model based on validation accuracy, and provides helper
-functions to compute the learning rate, batch loss, and epoch loss.
+updates the best performing model based on validation accuracy, optionally stops early
+when the validation loss stops decreasing, and provides helper functions to compute the
+learning rate, batch loss, and epoch loss.
 
 Functions:
     - train: Runs the training and validation loops over a specified number of epochs.
     - get_learning_rate: Retrieves the current learning rate from an optimizer.
+    - get_learning_rates: Retrieves the current learning rate of every named parameter group.
     - batch_correct_preds: Computes the number of correct predictions in a mini-batch.
     - get_batch_loss: Computes the loss for a mini-batch and performs backpropagation.
     - get_epoch_loss: Computes the average loss and accuracy over an epoch.
@@ -20,14 +22,16 @@ from tqdm import tqdm
 import torch
 import wandb
 
-def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30, amp=False):
+def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30, amp=False,
+          early_stopping_patience=None):
     """
     Train and validate the model over a given number of epochs.
     
     This function performs the training loop for a video classification model.
     It iterates through the specified number of epochs, updates model weights
     using backpropagation, and evaluates model performance on a validation set.
-    The model with the best validation accuracy is saved to disk.
+    The model with the best validation accuracy is saved to disk. If early_stopping_patience is
+    set, training stops once the validation loss has not decreased for that many epochs in a row.
 
     Args:
         dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders.
@@ -37,8 +41,10 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         scheduler (torch.optim.lr_scheduler): Learning rate scheduler, which adjusts the learning rate based on validation loss.
         device (torch.device): Device (CPU or GPU) on which to perform training.
         optim_model_wts_dir (str): Directory to save the best model weights.
-        n_epochs (int, optional): Number of training epochs. Default is 30.
+        n_epochs (int, optional): Maximum number of training epochs. Default is 30.
         amp (bool, optional): Use automatic mixed precision (float16) on CUDA. Default is False.
+        early_stopping_patience (int, optional): Stop after this many consecutive epochs without a
+            decrease in validation loss. Default is None (always train for n_epochs).
 
     Returns:
         tuple: (model, loss_hist, acc_hist)
@@ -51,11 +57,12 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_val_acc = 0.0
+    best_val_loss, epochs_since_best_loss = float('inf'), 0
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
     for epoch in range(n_epochs):
         current_lr = get_learning_rate(optimizer)
-        print('Epoch {}/{}; Current learning rate {}'.format(epoch+1, n_epochs, current_lr))
+        print('Epoch {}/{}; Current learning rate(s) {}'.format(epoch+1, n_epochs, get_learning_rates(optimizer)))
 
         # Training phase
         model.train()
@@ -77,7 +84,14 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         loss_hist['val'].append(val_loss)
         acc_hist['val'].append(val_accuracy)
 
+        # Track epochs without a decrease in validation loss for early stopping
+        if val_loss < best_val_loss:
+            best_val_loss, epochs_since_best_loss = val_loss, 0
+        else:
+            epochs_since_best_loss += 1
+
         # Update learning rate based on validation loss
+        lrs = get_learning_rates(optimizer)
         scheduler.step(val_loss)
         if current_lr != get_learning_rate(optimizer):
             print('Loading best model weights!')
@@ -87,17 +101,25 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         if wandb.run is not None:
             wandb.log({
                 'epoch': epoch + 1,
-                'lr': current_lr,
+                **{'lr/' + name: lr for name, lr in lrs.items()},
                 'train/loss': train_loss,
                 'train/accuracy': train_accuracy,
                 'val/loss': val_loss,
                 'val/accuracy': val_accuracy,
                 'val/best_accuracy': best_val_acc,
+                'val/best_loss': best_val_loss,
             })
 
         print("train loss: {:.6f}, val loss: {:.6f}, accuracy: {:.2f}".format(train_loss, val_loss, 100*val_accuracy))
         print("-" * 60)
         print()
+
+        if early_stopping_patience and epochs_since_best_loss >= early_stopping_patience:
+            print('Early stopping at epoch {}: validation loss has not decreased for {} epochs.'.format(
+                epoch + 1, early_stopping_patience))
+            if wandb.run is not None:
+                wandb.run.summary['early_stopped_epoch'] = epoch + 1
+            break
 
     # Load the best model weights before returning the model
     model.load_state_dict(best_model_wts)
@@ -115,6 +137,18 @@ def get_learning_rate(optimizer):
     """
     for param_group in optimizer.param_groups:
         return param_group['lr']
+
+def get_learning_rates(optimizer):
+    """
+    Retrieve the current learning rate of every parameter group of the optimizer.
+
+    Args:
+        optimizer (torch.optim.Optimizer): The optimizer from which to get the learning rates.
+
+    Returns:
+        dict: Learning rate per parameter group, keyed by the group's 'name' (or its index).
+    """
+    return {str(group.get('name', i)): group['lr'] for i, group in enumerate(optimizer.param_groups)}
 
 def batch_correct_preds(output, target):
     """

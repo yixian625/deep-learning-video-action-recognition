@@ -18,6 +18,7 @@ Classes:
 Functions:
     build_s3d: Builds an S3D model with a new classification layer (and input layer for flow).
     build_model: Builds the model selected by model_type ('lrcn', 's3d' or 's3d_flow').
+    get_param_groups: Splits the parameters into backbone and head groups with separate learning rates.
 """
 
 import torch
@@ -205,3 +206,30 @@ def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
     if model_type == 's3d_flow':
         return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate, in_channels=2)
     raise ValueError('model_type must be "lrcn", "s3d" or "s3d_flow".')
+
+
+def get_param_groups(model, model_type, lr, backbone_lr=None):
+    """
+    Split the model parameters into optimizer parameter groups with separate learning rates.
+
+    The head is the newly initialized part of the model: the final 1x1x1 conv classifier for S3D,
+    and the LSTM and final fully-connected layer for LRCN. Everything else is the pretrained
+    backbone, which is usually fine-tuned with a smaller learning rate.
+
+    Args:
+        model (nn.Module): The model.
+        model_type (str): 'lrcn', 's3d' or 's3d_flow'.
+        lr (float): Learning rate of the head (and of the whole model if backbone_lr is None).
+        backbone_lr (float, optional): Learning rate of the backbone. Default is None (use lr for all parameters).
+
+    Returns:
+        list: Parameter groups for a torch.optim optimizer, each with a 'name' ('all', 'backbone' or 'head').
+    """
+    if backbone_lr is None:
+        return [{'name': 'all', 'params': list(model.parameters()), 'lr': lr}]
+    head_modules = [model.rnn, model.fc] if model_type == 'lrcn' else [model.classifier]
+    head_ids = {id(p) for module in head_modules for p in module.parameters()}
+    backbone = [p for p in model.parameters() if id(p) not in head_ids]
+    head = [p for p in model.parameters() if id(p) in head_ids]
+    return [{'name': 'backbone', 'params': backbone, 'lr': backbone_lr},
+            {'name': 'head', 'params': head, 'lr': lr}]

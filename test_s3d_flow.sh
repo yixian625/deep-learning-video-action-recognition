@@ -7,4 +7,5 @@ python run.py \
     --batch_size 8 \
     --num_workers 6 \
     --amp \
+    --run_name s3d-two-flow-test \
     --mode eval

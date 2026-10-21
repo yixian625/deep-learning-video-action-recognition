@@ -37,7 +37,7 @@ import wandb
 from video_datasets import VideoDataset, ClipDataset, FlowClipDataset, load_dataset, dataset_split
 from utils import (transform_stats, compose_data_transforms, compose_clip_transforms, compose_flow_transforms,
                    train_val_dloaders, test_dloaders)
-from models import build_model
+from models import build_model, get_param_groups
 from train import train
 from test import test, get_test_report, get_confusion_matrix
 
@@ -63,12 +63,15 @@ def args_parser():
         -m/--mode: Mode of operation: 'train' or 'eval' (required).
         -bs/--batch_size: Mini-batch size (required).
         -d/--dropout: Dropout rate for regularization (default 0.1).
-        -lr/--learning_rate: Learning rate for training (default 3e-5).
-        -ne/--n_epochs: Number of training epochs (default 30).
+        -lr/--learning_rate: Learning rate for training; of the head only if --backbone_lr is set (default 3e-5).
+        -blr/--backbone_lr: Learning rate of the pretrained backbone (default: same as --learning_rate).
+        -ne/--n_epochs: Maximum number of training epochs (default 30).
+        -es/--early_stopping_patience: Stop after this many epochs without a decrease in val loss (default off).
         -wm/--wandb_mode: Weights & Biases mode: 'online', 'offline' or 'disabled' (default 'online').
         -od/--output_dir: Directory for the best model weights and splits (default './models/<model_type>').
         -nw/--num_workers: Number of DataLoader worker processes (default 0).
         --amp: Use automatic mixed precision on CUDA (default off).
+        -rn/--run_name: W&B run name (default '<model_type>-<mode>').
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -89,13 +92,19 @@ def args_parser():
     parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
     parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
     parser.add_argument('-d', '--dropout', type=float, default=0.1, help='Dropout rate for regularization')
-    parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5, help='Learning rate for model training')
-    parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Number of training epochs')
+    parser.add_argument('-lr', '--learning_rate', type=float, default=3e-5,
+                        help='Learning rate for model training (of the head only if --backbone_lr is set)')
+    parser.add_argument('-blr', '--backbone_lr', type=float,
+                        help='Learning rate of the pretrained backbone (default: same as --learning_rate)')
+    parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Maximum number of training epochs')
+    parser.add_argument('-es', '--early_stopping_patience', type=int,
+                        help='Stop after this many consecutive epochs without a decrease in validation loss (default: off)')
     parser.add_argument('-wm', '--wandb_mode', default='online', choices=['online', 'offline', 'disabled'],
                         help='Weights & Biases logging mode')
     parser.add_argument('-od', '--output_dir', help="Directory for model weights and splits (default './models/<model_type>')")
     parser.add_argument('-nw', '--num_workers', type=int, default=0, help='Number of DataLoader worker processes')
     parser.add_argument('--amp', action='store_true', help='Use automatic mixed precision on CUDA')
+    parser.add_argument('-rn', '--run_name', help="W&B run name (default '<model_type>-<mode>')")
 
     args = parser.parse_args()
     return args
@@ -175,7 +184,7 @@ def main(args):
 
     # Start a Weights & Biases run to track this experiment
     wandb.init(project='video-action-lrcn', job_type=mode, config=vars(args), mode=args.wandb_mode,
-               tags=[model_type])
+               name=args.run_name or '{}-{}'.format(model_type, mode), tags=[model_type])
 
     # Load transformation statistics and create data augmentation transforms
     # (video-level for LRCN, clip-level for S3D, flow-aware for the flow stream)
@@ -207,12 +216,13 @@ def main(args):
 
         # Define the loss function, optimizer, and learning rate scheduler
         loss_func = nn.CrossEntropyLoss(reduction='sum')
-        opt = optim.Adam(model.parameters(), lr=learning_rate)
+        opt = optim.Adam(get_param_groups(model, model_type, learning_rate, args.backbone_lr))
         lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
 
         # Main training procedure
         model.to(device)
-        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, output_dir, n_epochs, amp)
+        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, output_dir, n_epochs, amp,
+                                           args.early_stopping_patience)
 
     elif mode == 'eval':
         # Load the dataset splits saved next to the checkpoint during training
