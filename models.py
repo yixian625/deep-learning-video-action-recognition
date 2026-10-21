@@ -6,7 +6,8 @@ classification. The LRCN model combines a 2D CNN backbone (e.g., ResNet) for spa
 extraction from individual frames with an LSTM to capture temporal dynamics across frames.
 An additional fully-connected layer is used to output the final class predictions.
 
-It also provides an S3D 3D CNN (pretrained on Kinetics-400) and a factory to build either model.
+It also provides an S3D 3D CNN (pretrained on Kinetics-400) for RGB or optical flow input, and a
+factory to build the models.
 
 Classes:
     Identity: A helper module that returns the input unchanged. It is used to replace the fully-connected
@@ -15,10 +16,11 @@ Classes:
           fully-connected layer to produce class logits.
 
 Functions:
-    build_s3d: Builds an S3D model with a new classification layer.
-    build_model: Builds the model selected by model_type ('lrcn' or 's3d').
+    build_s3d: Builds an S3D model with a new classification layer (and input layer for flow).
+    build_model: Builds the model selected by model_type ('lrcn', 's3d' or 's3d_flow').
 """
 
+import torch
 import torch.nn as nn
 from torchvision import models
 from torchvision.models.video import s3d, S3D_Weights
@@ -141,7 +143,7 @@ class LRCN(nn.Module):
         return out
 
 
-def build_s3d(n_classes, pretrained=True, dropout_rate=0.2):
+def build_s3d(n_classes, pretrained=True, dropout_rate=0.2, in_channels=3):
     """
     Build an S3D model for video classification.
 
@@ -149,10 +151,15 @@ def build_s3d(n_classes, pretrained=True, dropout_rate=0.2):
     (batch_size, channels, time_steps, height, width). With pretrained=True, it is initialized
     from Kinetics-400 weights and its final 1x1x1 convolution is replaced to output n_classes logits.
 
+    For inputs with other than 3 channels (e.g., 2-channel optical flow), the first convolution is
+    replaced; its pretrained RGB filters are averaged over the color channels and copied to every
+    input channel ("cross-modality" initialization, as in TSN and I3D).
+
     Args:
         n_classes (int): Number of output classes.
         pretrained (bool, optional): If True, loads Kinetics-400 pretrained weights. Default is True.
         dropout_rate (float, optional): Dropout rate before the classification layer. Default is 0.2.
+        in_channels (int, optional): Number of input channels (3 for RGB, 2 for optical flow). Default is 3.
 
     Returns:
         nn.Module: The S3D model.
@@ -160,6 +167,13 @@ def build_s3d(n_classes, pretrained=True, dropout_rate=0.2):
     model = s3d(weights=S3D_Weights.KINETICS400_V1 if pretrained else None)
     model.classifier[0] = nn.Dropout(p=dropout_rate)
     model.classifier[1] = nn.Conv3d(model.classifier[1].in_channels, n_classes, kernel_size=1, stride=1, bias=True)
+    if in_channels != 3:
+        rgb_conv = model.features[0][0][0]
+        conv = nn.Conv3d(in_channels, rgb_conv.out_channels, kernel_size=rgb_conv.kernel_size,
+                         stride=rgb_conv.stride, padding=rgb_conv.padding, bias=False)
+        with torch.no_grad():
+            conv.weight.copy_(rgb_conv.weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1, 1))
+        model.features[0][0][0] = conv
     return model
 
 
@@ -169,7 +183,7 @@ def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
     Build the video classification model selected by model_type.
 
     Args:
-        model_type (str): 'lrcn' (2D CNN + LSTM) or 's3d' (3D CNN).
+        model_type (str): 'lrcn' (2D CNN + LSTM), 's3d' (3D CNN on RGB) or 's3d_flow' (3D CNN on optical flow).
         n_classes (int): Number of output classes.
         pretrained (bool, optional): Use pretrained weights (ImageNet for LRCN, Kinetics-400 for S3D). Default is True.
         dropout_rate (float, optional): Dropout rate before the classification layer. Default is 0.1.
@@ -188,4 +202,6 @@ def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
                     n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
     if model_type == 's3d':
         return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate)
-    raise ValueError('model_type must be either "lrcn" or "s3d".')
+    if model_type == 's3d_flow':
+        return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate, in_channels=2)
+    raise ValueError('model_type must be "lrcn", "s3d" or "s3d_flow".')

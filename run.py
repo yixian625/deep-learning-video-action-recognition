@@ -34,8 +34,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 import numpy as np
 import wandb
 
-from video_datasets import VideoDataset, ClipDataset, load_dataset, dataset_split
-from utils import transform_stats, compose_data_transforms, compose_clip_transforms, train_val_dloaders, test_dloaders
+from video_datasets import VideoDataset, ClipDataset, FlowClipDataset, load_dataset, dataset_split
+from utils import (transform_stats, compose_data_transforms, compose_clip_transforms, compose_flow_transforms,
+                   train_val_dloaders, test_dloaders)
 from models import build_model
 from train import train
 from test import test, get_test_report, get_confusion_matrix
@@ -54,7 +55,7 @@ def args_parser():
         -fpv/--fr_per_vid: Number of frames per video (LRCN) or per clip (S3D) to consider (default 16).
         -nc/--n_classes: Number of classes for the classification task (required).
         -c/--ckpt: Path for loading a trained model checkpoint.
-        -mt/--model_type: Model type, either 'lrcn' or 's3d' (default 'lrcn').
+        -mt/--model_type: Model type: 'lrcn', 's3d' (RGB) or 's3d_flow' (optical flow) (default 'lrcn').
         -cnn/--cnn_backbone: Backbone CNN for 2D feature extraction (default 'resnet34').
         -p/--pretrained: Whether to use pretrained weights: ImageNet for LRCN, Kinetics-400 for S3D (default True).
         -rhs/--rnn_hidden_size: Number of neurons in the RNN/LSTM hidden layer (default 100).
@@ -78,7 +79,8 @@ def args_parser():
     parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
 
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
-    parser.add_argument('-mt', '--model_type', default='lrcn', choices=['lrcn', 's3d'], help='LRCN (2D CNN + LSTM) or S3D (3D CNN)')
+    parser.add_argument('-mt', '--model_type', default='lrcn', choices=['lrcn', 's3d', 's3d_flow'],
+                        help='LRCN (2D CNN + LSTM), S3D (3D CNN) on RGB, or S3D on optical flow')
     parser.add_argument('-cnn', '--cnn_backbone', default='resnet34', help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
     parser.add_argument('-p', '--pretrained', help='Use pretrained weights (ImageNet for LRCN, Kinetics-400 for S3D)', default=True)
     parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
@@ -102,10 +104,10 @@ def build_datasets(model_type, splits, fr_per_vid, transforms):
     """
     Create a PyTorch Dataset for each split, using the dataset class that matches the model type.
 
-    LRCN uses VideoDataset (per-frame transforms); 3D CNNs use ClipDataset (clip-level transforms).
+    LRCN uses VideoDataset, S3D uses ClipDataset (RGB clips) and the flow stream uses FlowClipDataset.
 
     Args:
-        model_type (str): 'lrcn' or 's3d'.
+        model_type (str): 'lrcn', 's3d' or 's3d_flow'.
         splits (list): List of splits, each a list of (video_path, label) tuples.
         fr_per_vid (int): Number of frames per video / clip.
         transforms (list): Transform for each split.
@@ -113,7 +115,7 @@ def build_datasets(model_type, splits, fr_per_vid, transforms):
     Returns:
         list: One Dataset per split.
     """
-    dataset_cls = VideoDataset if model_type == 'lrcn' else ClipDataset
+    dataset_cls = {'lrcn': VideoDataset, 's3d': ClipDataset, 's3d_flow': FlowClipDataset}[model_type]
     return [dataset_cls(split, fr_per_vid, trans) for split, trans in zip(splits, transforms)]
 
 
@@ -176,9 +178,10 @@ def main(args):
                tags=[model_type])
 
     # Load transformation statistics and create data augmentation transforms
-    # (per-frame for LRCN, clip-level for 3D CNNs)
+    # (video-level for LRCN, clip-level for S3D, flow-aware for the flow stream)
     h, w, mean, std = transform_stats(model_type)
-    compose_transforms = compose_data_transforms if model_type == 'lrcn' else compose_clip_transforms
+    compose_transforms = {'lrcn': compose_data_transforms, 's3d': compose_clip_transforms,
+                          's3d_flow': compose_flow_transforms}[model_type]
     tr_transforms, val_ts_transforms = compose_transforms(h, w, mean, std)
 
     # Initialize the model (LRCN or S3D)

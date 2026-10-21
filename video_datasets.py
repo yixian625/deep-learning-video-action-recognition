@@ -24,7 +24,7 @@ import numpy as np
 from sklearn.model_selection import StratifiedGroupKFold
 
 
-def sorted_frame_paths(vid_dir):
+def sorted_frame_paths(vid_dir, prefix=''):
     """
     Return the JPEG frame paths of a video directory sorted by frame index.
 
@@ -33,11 +33,13 @@ def sorted_frame_paths(vid_dir):
 
     Args:
         vid_dir (str): Path to the video (frame) directory.
+        prefix (str, optional): Only include files whose name starts with this prefix
+            (e.g., 'flow_x_' for optical flow). Default is '' (all JPEG files).
 
     Returns:
         list: Frame paths in temporal order.
     """
-    fr_paths = glob.glob(vid_dir + '/*.jpg')
+    fr_paths = glob.glob(vid_dir + '/' + prefix + '*.jpg')
     return sorted(fr_paths, key=lambda p: int(re.search(r'(\d+)\.jpg$', p).group(1)))
 
 
@@ -105,10 +107,9 @@ class ClipDataset(Dataset):
     if the video has fewer. Unlike VideoDataset, transforms are applied to the whole clip at once
     (see utils.compose_clip_transforms), so random augmentations are identical for all frames.
 
-    To add another input modality for the same videos (e.g., optical flow for a two-stream model),
-    subclass this and override load_clip. Keep the same video keys so that predictions of the
-    two streams can be matched per video. Note that for optical flow a horizontal flip must also
-    negate the x component of the flow.
+    Other input modalities for the same videos subclass this and override load_clip (see
+    FlowClipDataset), keeping the same video keys so that predictions of the streams of a
+    two-stream model can be matched per video.
 
     Args:
         vid_dataset (list): List of (video_directory_path, label) tuples.
@@ -156,6 +157,42 @@ class ClipDataset(Dataset):
         if self.transforms:
             clip = self.transforms(clip)
         return clip.as_subclass(torch.Tensor), label
+
+
+class FlowClipDataset(ClipDataset):
+    """
+    PyTorch Dataset class for loading optical flow clips for the flow stream of a two-stream model.
+
+    Each video is a directory of flow images created by compute_flow.py: flow_x_{i}.jpg and
+    flow_y_{i}.jpg hold the horizontal and vertical flow between clip frames i and i + 1, quantized
+    to [0, 255] over [-bound, bound] pixels. Flow is returned as a float tensor of shape
+    (n_frames, 2, H, W) in units of the quantization bound (i.e., roughly in [-1, 1]); use
+    utils.compose_flow_transforms, which rescales the flow when resizing and negates the x flow
+    when flipping.
+
+    Args:
+        vid_dataset (list): List of (flow_directory_path, label) tuples.
+        n_frames (int): Number of flow fields per clip.
+        transforms (callable, optional): Flow clip transform applied to a float tensor of shape (T, 2, H, W).
+    """
+    def load_clip(self, vid_dir):
+        """
+        Load the flow clip of a video as a float tensor of shape (n_frames, 2, H, W).
+
+        Args:
+            vid_dir (str): Path to the video (flow) directory.
+
+        Returns:
+            torch.Tensor: The flow clip, in units of the quantization bound.
+        """
+        x_paths = sorted_frame_paths(vid_dir, prefix='flow_x_')[:self.n_frames]
+        y_paths = sorted_frame_paths(vid_dir, prefix='flow_y_')[:self.n_frames]
+        if not x_paths or len(x_paths) != len(y_paths):
+            raise RuntimeError('Missing flow images in {}'.format(vid_dir))
+        flows = [torch.cat([read_image(x_path, mode=ImageReadMode.GRAY), read_image(y_path, mode=ImageReadMode.GRAY)])
+                 for x_path, y_path in zip(x_paths, y_paths)]
+        flows += [flows[-1]] * (self.n_frames - len(flows))
+        return torch.stack(flows).float() / 255 * 2 - 1
 
 
 def load_dataset(frame_dir):

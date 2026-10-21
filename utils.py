@@ -7,7 +7,7 @@ for video classification tasks. It includes functions for:
     - Sampling a clip of consecutive (strided) frames from videos, for 3D CNNs.
     - Storing extracted frames as JPEG images.
     - Retrieving image transformation statistics based on the model type.
-    - Composing per-frame (LRCN) and clip-level (3D CNN) data transforms for training and validation/test datasets.
+    - Composing video-level (LRCN), clip-level (3D CNN) and optical flow data transforms for training and validation/test datasets.
     - Creating DataLoaders for training, validation, and testing, using custom collate functions.
 """
 
@@ -138,11 +138,11 @@ def transform_stats(model='lrcn'):
     Retrieve transformation statistics based on the model type.
 
     For the 'lrcn' model, images are resized to 224x224; for '3dcnn', images are resized to 112x112;
-    for 's3d', clips are cropped to 224x224 (matching its Kinetics-400 pretraining).
+    for 's3d' and 's3d_flow', clips are cropped to 224x224 (matching S3D's Kinetics-400 pretraining).
     Also returns the mean and standard deviation values used for normalization.
 
     Args:
-        model (str): Type of model ('lrcn', '3dcnn' or 's3d').
+        model (str): Type of model ('lrcn', '3dcnn', 's3d' or 's3d_flow').
 
     Returns:
         tuple: (h, w, mean, std)
@@ -166,6 +166,11 @@ def transform_stats(model='lrcn'):
         h, w = 224, 224
         mean = [0.43216, 0.394666, 0.37645]
         std = [0.22803, 0.22145, 0.216989]
+    elif model == 's3d_flow':
+        # Flow (x, y) is already zero-centered and scaled to roughly [-1, 1] by FlowClipDataset
+        h, w = 224, 224
+        mean = [0.0, 0.0]
+        std = [1.0, 1.0]
     else:
         raise ValueError('model_type arg is undefined....')
     return h, w, mean, std
@@ -240,6 +245,71 @@ def compose_clip_transforms(height, width, mean, std, resize=(256, 256)):
         v2.Normalize(mean, std),
     ])
     return train_transforms, val_test_transforms
+
+
+class FlowClipTransform:
+    """
+    Clip-level spatial transform for optical flow clips of shape (T, 2, H, W).
+
+    Resizes, crops and (for training) randomly flips all flow fields of a clip identically. Unlike
+    image transforms, it also updates the flow values: resizing scales the x and y flow by the
+    horizontal and vertical resize factors, and a horizontal flip negates the x flow (motion to the
+    right becomes motion to the left).
+
+    Args:
+        height (int): Crop height.
+        width (int): Crop width.
+        mean (list): Mean of the (x, y) flow channels for normalization.
+        std (list): Standard deviation of the (x, y) flow channels for normalization.
+        resize (tuple, optional): Size each flow field is resized to before cropping. Default is (256, 256).
+        train (bool, optional): If True, random crop and horizontal flip; else center crop. Default is True.
+    """
+    def __init__(self, height, width, mean, std, resize=(256, 256), train=True):
+        self.height, self.width = height, width
+        self.mean = torch.tensor(mean).view(1, 2, 1, 1)
+        self.std = torch.tensor(std).view(1, 2, 1, 1)
+        self.resize = resize
+        self.train = train
+
+    def __call__(self, flow):
+        h0, w0 = flow.shape[-2:]
+        flow = torch.nn.functional.interpolate(flow, size=self.resize, mode='bilinear', align_corners=False)
+        scale = torch.tensor([self.resize[1] / w0, self.resize[0] / h0]).view(1, 2, 1, 1)
+        flow = flow * scale
+
+        max_top, max_left = self.resize[0] - self.height, self.resize[1] - self.width
+        if self.train:
+            top = int(torch.randint(0, max_top + 1, (1,)))
+            left = int(torch.randint(0, max_left + 1, (1,)))
+        else:
+            top, left = max_top // 2, max_left // 2
+        flow = flow[..., top:top + self.height, left:left + self.width]
+
+        if self.train and torch.rand(1).item() < 0.5:
+            flow = flow.flip(-1)
+            flow[:, 0] = -flow[:, 0]
+        return (flow - self.mean) / self.std
+
+
+def compose_flow_transforms(height, width, mean, std, resize=(256, 256)):
+    """
+    Compose and return clip-level transforms for optical flow clips (two-stream flow stream).
+
+    Matches compose_clip_transforms (resize to 256x256, random or center 224x224 crop, horizontal
+    flip for training) while keeping the flow values consistent with the geometry (see FlowClipTransform).
+
+    Args:
+        height (int): Crop height.
+        width (int): Crop width.
+        mean (list): Mean of the (x, y) flow channels for normalization.
+        std (list): Standard deviation of the (x, y) flow channels for normalization.
+        resize (tuple, optional): Size each flow field is resized to before cropping. Default is (256, 256).
+
+    Returns:
+        tuple: (train_transforms, val_test_transforms)
+    """
+    return (FlowClipTransform(height, width, mean, std, resize, train=True),
+            FlowClipTransform(height, width, mean, std, resize, train=False))
 
 
 def train_val_dloaders(train_dataset, val_dataset, batch_size, model='lrcn', num_workers=0):

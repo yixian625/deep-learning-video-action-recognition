@@ -1,6 +1,6 @@
 # Video Classification with UCF50
 
-This project implements a video classification pipeline using the UCF50 dataset (originally written for HMDB51). It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. It also supports an S3D 3D CNN pretrained on Kinetics-400 (see [3D CNN (S3D)](#3d-cnn-s3d)). The project includes scripts for preprocessing, training, and testing the models.
+This project implements a video classification pipeline using the UCF50 dataset (originally written for HMDB51). It leverages a Long-term Recurrent Convolutional Network (LRCN) model that extracts spatial features from individual video frames via a ResNet backbone and learns temporal dynamics through an LSTM. It also supports an S3D 3D CNN pretrained on Kinetics-400 and a two-stream (RGB + optical flow) S3D model (see [3D CNN (S3D)](#3d-cnn-s3d)). The project includes scripts for preprocessing, training, and testing the models.
 
 ---
 
@@ -150,7 +150,7 @@ The testing script will:
 - **Create a DataLoader for the test set.**
 - **Load the trained model checkpoint.**
 - **Evaluate the model** on the test data by computing overall accuracy, generating classification reports, and optionally producing confusion matrices.
-- **Save per-video class probabilities** to `test_predictions.npz` next to the checkpoint (see [Two-stream extension](#two-stream-extension)).
+- **Save per-video class probabilities** to `test_predictions.npz` next to the checkpoint (see [Two-stream](#two-stream-rgb--optical-flow)).
 
 ---
 
@@ -196,14 +196,33 @@ Results are on UCF50 with the group-aware 80/10/10 split (5,343 / 668 / 670 clip
 
 The weakest test classes are Nunchucks (8/16), Fencing (5/9) and PullUps (8/12). With lr 1e-4, validation accuracy swung between 79% and 88% in epochs 5-10, and the model only improved after the lr dropped to 5e-5. That suggests starting future runs at a lower lr.
 
-### Two-stream extension
+### Two-stream (RGB + optical flow)
 
-The pipeline is set up so that an optical-flow stream can be added and late-fused with S3D:
+A second S3D stream is trained on optical flow, and its predictions are late-fused with the RGB stream.
 
-- **Flow source frames:** compute flow from the frames in `data/UCF50_clips`, so the flow is temporally aligned with the RGB clips.
-- **Flow dataset:** subclass `ClipDataset` and override `load_clip` to load the flow images for the same video directory names. A horizontal flip must also negate the x component of the flow.
-- **Flow model and training:** add the flow model to `models.build_model`, and train it with `run.py` and its own `--output_dir`. Because the split is computed from the video names, both streams get the same train/val/test split.
-- **Fusion:** each eval run writes `test_predictions.npz` (`video_keys`, `labels`, `probs`) next to its checkpoint. Late fusion averages the `probs` of the two streams per `video_key`, so each stream's accuracy and the fused accuracy can be compared.
+1. **Compute flow:** run RAFT-small (torchvision, `raft_small_C_T_V2-01064c6d.pth`, 3.8 MB, downloaded on the first run) on the 31 consecutive frame pairs of each clip in `data/UCF50_clips`, so the flow lines up in time with the RGB clips. The x and y flow, clipped to ±20 px, are stored as grayscale JPEGs `flow_x_{i}.jpg` / `flow_y_{i}.jpg` in `data/UCF50_flow`.
+
+   ```bash
+   python compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
+   ```
+
+2. **Train and evaluate the flow stream:** this uses the same hyperparameters as the RGB stream, with `--model_type s3d_flow --fr_per_vid 31`.
+
+   ```bash
+   bash train_s3d_flow.sh
+   bash test_s3d_flow.sh
+   ```
+
+3. **Fuse:** `fuse.py` matches both streams' `test_predictions.npz` by video and averages their class probabilities with equal weights (the weights are not tuned on the test set). It reports RGB, flow and fused test accuracy, and logs them to W&B.
+
+   ```bash
+   bash fuse_two_stream.sh
+   ```
+
+**Implementation notes**
+- **Model:** `build_s3d(..., in_channels=2)` replaces S3D's first convolution and initializes it with the average of the pretrained RGB filters (cross-modality initialization, as in TSN/I3D). The rest of the network keeps its Kinetics-400 weights.
+- **Augmentation:** `FlowClipDataset` and `FlowClipTransform` apply the same resize, crop and flip as the RGB stream, and keep the flow values consistent with the geometry. Resizing scales the x/y flow by the resize factors, and a horizontal flip negates the x flow.
+- **Same split:** the split is computed from the video names, so both streams get the identical train/val/test split.
 
 ---
 
@@ -218,7 +237,7 @@ You can modify several parameters to experiment with different settings:
 
 ### Model Parameters
 
-- `--model_type`: Choose between `'lrcn'` (default) and `'s3d'`.
+- `--model_type`: Choose between `'lrcn'` (default), `'s3d'` (RGB) and `'s3d_flow'` (optical flow).
 - `--cnn_backbone`: Options include `resnet18`, `resnet34`, `resnet50`, `resnet101`, or `resnet152`.
 - `--rnn_hidden_size` and `--rnn_n_layers`: Configure the LSTM network.
 
