@@ -206,23 +206,61 @@ A second S3D stream is trained on optical flow, and its predictions are late-fus
    python compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
    ```
 
-2. **Train and evaluate the flow stream:** this uses the same hyperparameters as the RGB stream, with `--model_type s3d_flow --fr_per_vid 31`.
+2. **Train and evaluate the flow stream** with `--model_type s3d_flow --fr_per_vid 32`. That's 31 flow fields plus the last one repeated: an odd clip length of 31 makes cuDNN about 2.8x slower. Both streams use separate learning rates for the new classification layer (`--learning_rate 5e-4`) and the pretrained backbone (`--backbone_lr`), plus early stopping: training stops once validation loss hasn't decreased for 10 epochs (`--early_stopping_patience 10`, `--n_epochs 50` maximum). The flow stream differs from the RGB pretraining much more, so it uses a 2x higher backbone lr (1e-4 vs 5e-5 for RGB). It also uses BatchNorm momentum 0.01 (`--bn_momentum`; torchvision's S3D default of 0.001 would keep the RGB running statistics for several epochs). W&B runs are named `s3d-two-flow-train`, `s3d-two-flow-test` and `s3d-two-fusion` (`--run_name`).
 
    ```bash
    bash train_s3d_flow.sh
    bash test_s3d_flow.sh
    ```
 
-3. **Fuse:** `fuse.py` matches both streams' `test_predictions.npz` by video and averages their class probabilities with equal weights (the weights are not tuned on the test set). It reports RGB, flow and fused test accuracy, and logs them to W&B.
+   The RGB stream is retrained with the same schedule (separate lrs and early stopping; backbone lr 5e-5, default BatchNorm momentum) into `models/s3d_two_rgb/`, with W&B runs `s3d-two-rgb-train` / `s3d-two-rgb-test`:
+
+   ```bash
+   bash train_s3d_rgb.sh
+   bash test_s3d_rgb.sh
+   ```
+
+3. **Fuse:** `fuse.py` matches both streams' `test_predictions.npz` (`models/s3d_two_rgb/` and `models/s3d_flow/`) by video and averages their class probabilities with equal weights (the weights are not tuned on the test set). It reports RGB, flow and fused test accuracy, and logs them to W&B.
 
    ```bash
    bash fuse_two_stream.sh
+   ```
+
+   To choose the weights on the **validation** set instead, `fuse_two_stream_val_weighted.sh` evaluates both streams on the validation split (`run.py --eval_split val` writes `val_predictions.npz`). `fuse.py --val_preds` then grid-searches the flow weight (step 0.05) for the best fused validation accuracy, and applies it to the test predictions.
+
+   ```bash
+   bash fuse_two_stream_val_weighted.sh
    ```
 
 **Implementation notes**
 - **Model:** `build_s3d(..., in_channels=2)` replaces S3D's first convolution and initializes it with the average of the pretrained RGB filters (cross-modality initialization, as in TSN/I3D). The rest of the network keeps its Kinetics-400 weights.
 - **Augmentation:** `FlowClipDataset` and `FlowClipTransform` apply the same resize, crop and flip as the RGB stream, and keep the flow values consistent with the geometry. Resizing scales the x/y flow by the resize factors, and a horizontal flip negates the x flow.
 - **Same split:** the split is computed from the video names, so both streams get the identical train/val/test split.
+
+### Two-stream results
+
+Results are on the same split and test set as [Results](#results), from single runs without a fixed seed. Both streams use Adam with head lr 5e-4, `ReduceLROnPlateau` (factor 0.5, patience 5), early stopping (patience 10, max 50 epochs), batch size 8 and mixed precision. The checkpoint is the one with the best val accuracy.
+
+| Model | Backbone lr | Epochs | Best val acc | **Test acc** | Test macro F1 |
+|---|---|---|---|---|---|
+| S3D RGB, original run (`train_s3d.sh`, single lr 1e-4) | 1e-4 | 20 (fixed) | 91.8% | 93.9% | 0.935 |
+| **S3D RGB stream** (`train_s3d_rgb.sh`) | 5e-5 | 23 (early stop) | 95.1% | **94.9%** | **0.949** |
+| S3D flow stream (`train_s3d_flow.sh`, BN momentum 0.01) | 1e-4 | 49 (early stop) | 82.0% | 75.7% | 0.742 |
+| Fusion, equal weights | | | | 92.5% | |
+| Fusion, weights chosen on val (RGB 0.9 / flow 0.1) | | | 95.5% | 94.9% | |
+
+**Fusion does not improve on RGB alone.** This is how the two streams' answers compare on the 670 test videos:
+
+| | Flow correct | Flow wrong |
+|---|---|---|
+| **RGB correct** | 493 | 143 |
+| **RGB wrong** | 14 | 20 |
+
+- **Fusion can only fix the 14 videos that flow gets right and RGB gets wrong.** Averaging the two models' predictions can only turn a wrong RGB answer into a right one if flow has that video right. The 20 videos that both models get wrong can't be fixed. So even a perfect way of combining the two models would reach at most 97.0% (650 of 670 videos), 2.1 points above RGB alone.
+- **Averaging with equal weights ruins more videos than it fixes.** There are 143 videos where RGB is right and flow is wrong, and averaging changed 27 of them to a wrong answer. It fixed only 11 of the 14. The net result is 16 fewer correct videos, so test accuracy drops from 94.9% to 92.5%. Flow does this damage partly because it's about as confident when it's wrong as RGB is: its top-class probability averages 0.77 on its wrong answers, versus 0.72 for RGB's wrong answers.
+- **Choosing the weights on the validation set** gives flow only 10% of the weight. That improves validation accuracy by 3 videos, but doesn't change a single test prediction, so the fused test accuracy equals RGB's 94.9%.
+
+The best model is the RGB stream (94.9% test). The flow stream is likely held back by its RGB-pretrained initialization: published two-stream gains, e.g. I3D, use flow streams pretrained on Kinetics flow. It is also limited by overfitting (train loss ~0.02 vs val loss ~0.9) and a single 2-second flow window per video.
 
 ---
 
@@ -245,6 +283,10 @@ You can modify several parameters to experiment with different settings:
 
 - `--batch_size`, `--learning_rate`, `--n_epochs`, and `--dropout` control the training dynamics.
 - `--amp` enables mixed precision and `--num_workers` sets the number of DataLoader worker processes.
+- `--backbone_lr` sets a separate (usually smaller) learning rate for the pretrained backbone; `--learning_rate` then applies to the new head only (S3D: final 1x1x1 conv; LRCN: LSTM and final layer).
+- `--early_stopping_patience N` stops training after N epochs without a decrease in validation loss (`--n_epochs` is then the maximum).
+- `--run_name` sets the W&B run name (default `<model_type>-<mode>`).
+- `--bn_momentum` (S3D only) sets the momentum of the BatchNorm running statistics (default 0.001).
 - `--train_size` and `--test_size` determine dataset splits.
 
 By tweaking these parameters, you can study their impact on model performance and experiment with different network configurations.

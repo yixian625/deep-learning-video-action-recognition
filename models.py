@@ -144,7 +144,7 @@ class LRCN(nn.Module):
         return out
 
 
-def build_s3d(n_classes, pretrained=True, dropout_rate=0.2, in_channels=3):
+def build_s3d(n_classes, pretrained=True, dropout_rate=0.2, in_channels=3, bn_momentum=None):
     """
     Build an S3D model for video classification.
 
@@ -161,6 +161,9 @@ def build_s3d(n_classes, pretrained=True, dropout_rate=0.2, in_channels=3):
         pretrained (bool, optional): If True, loads Kinetics-400 pretrained weights. Default is True.
         dropout_rate (float, optional): Dropout rate before the classification layer. Default is 0.2.
         in_channels (int, optional): Number of input channels (3 for RGB, 2 for optical flow). Default is 3.
+        bn_momentum (float, optional): Momentum of all BatchNorm running statistics. torchvision's S3D
+            uses 0.001, so the running statistics adapt very slowly to a new input distribution (e.g.,
+            optical flow instead of RGB). Default is None (keep 0.001).
 
     Returns:
         nn.Module: The S3D model.
@@ -175,11 +178,15 @@ def build_s3d(n_classes, pretrained=True, dropout_rate=0.2, in_channels=3):
         with torch.no_grad():
             conv.weight.copy_(rgb_conv.weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1, 1))
         model.features[0][0][0] = conv
+    if bn_momentum is not None:
+        for module in model.modules():
+            if isinstance(module, nn.BatchNorm3d):
+                module.momentum = bn_momentum
     return model
 
 
 def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
-                rnn_hidden_size=100, rnn_n_layers=1, cnn_backbone='resnet34'):
+                rnn_hidden_size=100, rnn_n_layers=1, cnn_backbone='resnet34', bn_momentum=None):
     """
     Build the video classification model selected by model_type.
 
@@ -191,6 +198,7 @@ def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
         rnn_hidden_size (int, optional): LRCN only: number of neurons in the LSTM hidden layer. Default is 100.
         rnn_n_layers (int, optional): LRCN only: number of LSTM layers. Default is 1.
         cnn_backbone (str, optional): LRCN only: ResNet backbone. Default is 'resnet34'.
+        bn_momentum (float, optional): S3D only: momentum of the BatchNorm running statistics. Default is None (0.001).
 
     Returns:
         nn.Module: The model.
@@ -202,9 +210,10 @@ def build_model(model_type, n_classes, pretrained=True, dropout_rate=0.1,
         return LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout_rate,
                     n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
     if model_type == 's3d':
-        return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate)
+        return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate, bn_momentum=bn_momentum)
     if model_type == 's3d_flow':
-        return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate, in_channels=2)
+        return build_s3d(n_classes, pretrained=pretrained, dropout_rate=dropout_rate, in_channels=2,
+                         bn_momentum=bn_momentum)
     raise ValueError('model_type must be "lrcn", "s3d" or "s3d_flow".')
 
 

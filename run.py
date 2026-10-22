@@ -19,6 +19,8 @@ the following:
     - Loads the trained model checkpoint.
     - Evaluates the model on the test set, prints overall test accuracy, and saves the per-video
       class probabilities (test_predictions.npz) next to the checkpoint, e.g. for two-stream late fusion.
+      With --eval_split val, it evaluates the validation set instead (val_predictions.npz), e.g. to
+      choose fusion weights without using the test set.
     
 The module also includes a helper function for parsing command-line arguments.
 """
@@ -72,6 +74,8 @@ def args_parser():
         -nw/--num_workers: Number of DataLoader worker processes (default 0).
         --amp: Use automatic mixed precision on CUDA (default off).
         -rn/--run_name: W&B run name (default '<model_type>-<mode>').
+        -bnm/--bn_momentum: S3D only: BatchNorm momentum (default: torchvision's 0.001).
+        -esp/--eval_split: Split evaluated in eval mode: 'test' or 'val' (default 'test').
     """
     parser = argparse.ArgumentParser(description='Video Classification Training')
 
@@ -105,6 +109,10 @@ def args_parser():
     parser.add_argument('-nw', '--num_workers', type=int, default=0, help='Number of DataLoader worker processes')
     parser.add_argument('--amp', action='store_true', help='Use automatic mixed precision on CUDA')
     parser.add_argument('-rn', '--run_name', help="W&B run name (default '<model_type>-<mode>')")
+    parser.add_argument('-esp', '--eval_split', default='test', choices=['test', 'val'],
+                        help="Split evaluated in eval mode (default 'test'; 'val' e.g. for choosing fusion weights)")
+    parser.add_argument('-bnm', '--bn_momentum', type=float,
+                        help="S3D only: momentum of the BatchNorm running statistics (default: torchvision's 0.001)")
 
     args = parser.parse_args()
     return args
@@ -195,7 +203,8 @@ def main(args):
 
     # Initialize the model (LRCN or S3D)
     model = build_model(model_type, n_classes, pretrained=pretrained, dropout_rate=dropout,
-                        rnn_hidden_size=rnn_hidden_size, rnn_n_layers=rnn_n_layers, cnn_backbone=cnn_backbone)
+                        rnn_hidden_size=rnn_hidden_size, rnn_n_layers=rnn_n_layers, cnn_backbone=cnn_backbone,
+                        bn_momentum=args.bn_momentum)
 
     if mode == 'train':
         # Load dataset and split into train/validation/test
@@ -228,10 +237,11 @@ def main(args):
         # Load the dataset splits saved next to the checkpoint during training
         ckpt_dir = os.path.dirname(ckpt)
         splits = np.load(os.path.join(ckpt_dir, 'splits.npy'), allow_pickle=True)
-        ts_split = splits.item()['test']
+        split_name = args.eval_split
+        ts_split = splits.item()[split_name]
         ts_split = [(sample[0], int(sample[1])) for sample in ts_split]
 
-        # Create PyTorch Dataset and DataLoader for the test set
+        # Create PyTorch Dataset and DataLoader for the evaluated split
         ts_dataset, = build_datasets(model_type, [ts_split], fr_per_vid, [val_ts_transforms])
         dataloaders = test_dloaders(ts_dataset, batch_size, model_type, num_workers)
 
@@ -240,11 +250,11 @@ def main(args):
         model.to(device)
         targets, outputs, accuracy, probs = test(model, dataloaders['test'], device, amp)
 
-        print('The overall test accuracy is {:.4f}%.'.format(100 * accuracy))
+        print('The overall {} accuracy is {:.4f}%.'.format(split_name, 100 * accuracy))
 
         # Save per-video class probabilities; streams evaluated on the same split can be fused
         # by averaging their probabilities per video key
-        np.savez(os.path.join(ckpt_dir, 'test_predictions.npz'),
+        np.savez(os.path.join(ckpt_dir, '{}_predictions.npz'.format(split_name)),
                  video_keys=np.array([video_key(vid_path) for vid_path, _ in ts_split]),
                  labels=np.array(targets), probs=probs)
 
@@ -255,19 +265,19 @@ def main(args):
                 labels_dict[os.path.basename(os.path.dirname(vid_path))] = int(label)
         all_cats = sorted(labels_dict, key=labels_dict.get)
 
-        # Log test accuracy, per-class report and confusion matrix to W&B
+        # Log accuracy, per-class report and confusion matrix of the evaluated split to W&B
         report = get_test_report(targets, outputs, all_cats)
         report_table = wandb.Table(columns=['class', 'precision', 'recall', 'f1-score', 'support'])
         for cat in all_cats:
             report_table.add_data(cat, *[report[cat][k] for k in ['precision', 'recall', 'f1-score', 'support']])
         wandb.log({
-            'test/accuracy': accuracy,
-            'test/classification_report': report_table,
-            'test/confusion_matrix': wandb.plot.confusion_matrix(
+            '{}/accuracy'.format(split_name): accuracy,
+            '{}/classification_report'.format(split_name): report_table,
+            '{}/confusion_matrix'.format(split_name): wandb.plot.confusion_matrix(
                 y_true=targets, preds=outputs, class_names=all_cats),
         })
-        wandb.run.summary['test/accuracy'] = accuracy
-        wandb.run.summary['test/macro_f1'] = report['macro avg']['f1-score']
+        wandb.run.summary['{}/accuracy'.format(split_name)] = accuracy
+        wandb.run.summary['{}/macro_f1'.format(split_name)] = report['macro avg']['f1-score']
 
     else:
         raise ValueError('The mode argument must be either "train" or "eval".')
