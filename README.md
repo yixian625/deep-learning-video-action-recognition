@@ -215,6 +215,8 @@ All models are tested on the same 670 clips, from source videos none of them saw
 
 \*The fused model's validation accuracy, at the weights the search picked.
 
+**Note on training length:** the LRCN and S3D (RGB only) runs used a fixed number of epochs (30 and 20) without early stopping. Retraining them with the two-stream setup (early stopping, up to 50 epochs) would have taken several more hours each, so the available GPU time went to the two-stream models instead.
+
 - **Kinetics-pretrained 3D CNN:** S3D beats LRCN by 7.3 points. Learning motion from consecutive frames, with pretraining on an action dataset, matters more than anything else here.
 - **Two-stream:** the best two-stream model gives exactly the same test results as its RGB stream alone. Its gain over the S3D row comes from the RGB stream's better training settings (separate learning rates and early stopping), not from adding flow.
 
