@@ -39,7 +39,7 @@ from video_datasets import VideoDataset, ClipDataset, FlowClipDataset, load_data
 from utils import (transform_stats, compose_data_transforms, compose_clip_transforms, compose_flow_transforms,
                    train_val_dloaders, test_dloaders)
 from models import build_model, get_param_groups
-from train import train
+from train import train, TrainConfig
 from evaluate import test, get_test_report
 
 def args_parser():
@@ -150,144 +150,160 @@ def main(args):
     """
     Main function to execute training or evaluation based on the parsed command-line arguments.
 
-    For training:
-        - Loads the dataset from the specified frame directory.
-        - Splits the dataset into training, validation, and test sets.
-        - Saves the splits for later use.
-        - Creates the training and validation DataLoaders.
-        - Initializes the model (LRCN or S3D) with specified hyperparameters.
-        - Defines the loss function, optimizer, and learning rate scheduler.
-        - Runs the training loop and saves the best model weights.
-
-    For evaluation:
-        - Loads the saved dataset splits.
-        - Creates the test DataLoader.
-        - Loads the trained model checkpoint.
-        - Evaluates the model on the test set, prints the overall test accuracy, and saves
-          the per-video class probabilities next to the checkpoint.
+    Starts a Weights & Biases run, builds the data transforms and the model, and then either
+    trains the model (run_train) or evaluates a trained checkpoint (run_eval).
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
     """
-    # Dataset parameters
-    frame_dir = args.frame_dir
-    tr_size = args.train_size
-    ts_size = args.test_size
-    fr_per_vid = args.fr_per_vid
-    n_classes = args.n_classes
-
-    # Model parameters
-    model_type = args.model_type
-    rnn_hidden_size = args.rnn_hidden_size
-    rnn_n_layers = args.rnn_n_layers
-    dropout = args.dropout
-    pretrained = args.pretrained
-    cnn_backbone = args.cnn_backbone
-    ckpt = args.ckpt
-
-    # Training parameters
-    mode = args.mode
-    batch_size = args.batch_size
-    n_epochs = args.n_epochs
-    learning_rate = args.learning_rate
-    num_workers = args.num_workers
-    amp = args.amp
-    output_dir = args.output_dir or os.path.join('./models', model_type)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Start a Weights & Biases run to track this experiment
-    wandb.init(project='video-action-lrcn', job_type=mode, config=vars(args), mode=args.wandb_mode,
-               name=args.run_name or f'{model_type}-{mode}', tags=[model_type])
+    wandb.init(project='video-action-lrcn', job_type=args.mode, config=vars(args), mode=args.wandb_mode,
+               name=args.run_name or f'{args.model_type}-{args.mode}', tags=[args.model_type])
 
     # Load transformation statistics and create data augmentation transforms
     # (video-level for LRCN, clip-level for S3D, flow-aware for the flow stream)
-    h, w, mean, std = transform_stats(model_type)
+    h, w, mean, std = transform_stats(args.model_type)
     compose_transforms = {'lrcn': compose_data_transforms, 's3d': compose_clip_transforms,
-                          's3d_flow': compose_flow_transforms}[model_type]
+                          's3d_flow': compose_flow_transforms}[args.model_type]
     tr_transforms, val_ts_transforms = compose_transforms(h, w, mean, std)
 
     # Initialize the model (LRCN or S3D)
-    model = build_model(model_type, n_classes, pretrained=pretrained, dropout_rate=dropout,
-                        rnn_hidden_size=rnn_hidden_size, rnn_n_layers=rnn_n_layers, cnn_backbone=cnn_backbone,
-                        bn_momentum=args.bn_momentum)
+    model = build_model(args.model_type, args.n_classes, pretrained=args.pretrained, dropout_rate=args.dropout,
+                        rnn_hidden_size=args.rnn_hidden_size, rnn_n_layers=args.rnn_n_layers,
+                        cnn_backbone=args.cnn_backbone, bn_momentum=args.bn_momentum)
 
-    if mode == 'train':
-        # Load dataset and split into train/validation/test
-        vid_dataset, _ = load_dataset(frame_dir)
-        tr_split, val_split, ts_split = dataset_split(vid_dataset, tr_size, ts_size)
-
-        # Save the splits next to the model weights for reproducibility and later use in evaluation
-        os.makedirs(output_dir, exist_ok=True)
-        splits = {'train': np.array(tr_split),
-                  'val': np.array(val_split),
-                  'test': np.array(ts_split)}
-        np.save(os.path.join(output_dir, 'splits.npy'), splits)
-
-        # Create PyTorch Datasets and DataLoaders for train and validation
-        tr_dataset, val_dataset = build_datasets(model_type, [tr_split, val_split], fr_per_vid,
-                                                 [tr_transforms, val_ts_transforms])
-        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type, num_workers)
-
-        # Define the loss function, optimizer, and learning rate scheduler
-        loss_func = nn.CrossEntropyLoss(reduction='sum')
-        opt = optim.Adam(get_param_groups(model, model_type, learning_rate, args.backbone_lr))
-        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
-
-        # Main training procedure
-        model.to(device)
-        train(dataloaders, model, loss_func, opt, lr_scheduler, device, output_dir, n_epochs, amp,
-              args.early_stopping_patience)
-
-    elif mode == 'eval':
-        # Load the dataset splits saved next to the checkpoint during training
-        ckpt_dir = os.path.dirname(ckpt)
-        splits = np.load(os.path.join(ckpt_dir, 'splits.npy'), allow_pickle=True)
-        split_name = args.eval_split
-        ts_split = splits.item()[split_name]
-        ts_split = [(sample[0], int(sample[1])) for sample in ts_split]
-
-        # Create PyTorch Dataset and DataLoader for the evaluated split
-        ts_dataset, = build_datasets(model_type, [ts_split], fr_per_vid, [val_ts_transforms])
-        dataloaders = test_dloaders(ts_dataset, batch_size, model_type, num_workers)
-
-        # Load the trained model checkpoint
-        model.load_state_dict(torch.load(ckpt))
-        model.to(device)
-        targets, outputs, accuracy, probs = test(model, dataloaders['test'], device, amp)
-
-        print(f'The overall {split_name} accuracy is {100 * accuracy:.4f}%.')
-
-        # Save per-video class probabilities; streams evaluated on the same split can be fused
-        # by averaging their probabilities per video key
-        np.savez(os.path.join(ckpt_dir, f'{split_name}_predictions.npz'),
-                 video_keys=np.array([video_key(vid_path) for vid_path, _ in ts_split]),
-                 labels=np.array(targets), probs=probs)
-
-        # Recover class names from the saved split paths (<frame_dir>/<class>/<video>)
-        labels_dict = {}
-        for split in splits.item().values():
-            for vid_path, label in split:
-                labels_dict[os.path.basename(os.path.dirname(vid_path))] = int(label)
-        all_cats = sorted(labels_dict, key=labels_dict.get)
-
-        # Log accuracy, per-class report and confusion matrix of the evaluated split to W&B
-        report = get_test_report(targets, outputs, all_cats)
-        report_table = wandb.Table(columns=['class', 'precision', 'recall', 'f1-score', 'support'])
-        for cat in all_cats:
-            report_table.add_data(cat, *[report[cat][k] for k in ['precision', 'recall', 'f1-score', 'support']])
-        wandb.log({
-            f'{split_name}/accuracy': accuracy,
-            f'{split_name}/classification_report': report_table,
-            f'{split_name}/confusion_matrix': wandb.plot.confusion_matrix(
-                y_true=targets, preds=outputs, class_names=all_cats),
-        })
-        wandb.run.summary[f'{split_name}/accuracy'] = accuracy
-        wandb.run.summary[f'{split_name}/macro_f1'] = report['macro avg']['f1-score']
-
+    if args.mode == 'train':
+        run_train(args, model, (tr_transforms, val_ts_transforms), device)
+    elif args.mode == 'eval':
+        run_eval(args, model, val_ts_transforms, device)
     else:
         raise ValueError('The mode argument must be either "train" or "eval".')
 
     wandb.finish()
+
+
+def run_train(args, model, transforms, device):
+    """
+    Split the dataset, save the splits, and train the model.
+
+    The splits and the best model weights are saved to --output_dir (default './models/<model_type>').
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments.
+        model (torch.nn.Module): The model to train.
+        transforms (tuple): (train_transforms, val_transforms).
+        device (torch.device): Device (CPU or GPU) on which to train.
+    """
+    output_dir = args.output_dir or os.path.join('./models', args.model_type)
+
+    # Load dataset and split into train/validation/test
+    vid_dataset, _ = load_dataset(args.frame_dir)
+    tr_split, val_split, ts_split = dataset_split(vid_dataset, args.train_size, args.test_size)
+
+    # Save the splits next to the model weights for reproducibility and later use in evaluation
+    os.makedirs(output_dir, exist_ok=True)
+    splits = {'train': np.array(tr_split),
+              'val': np.array(val_split),
+              'test': np.array(ts_split)}
+    np.save(os.path.join(output_dir, 'splits.npy'), splits)
+
+    # Create PyTorch Datasets and DataLoaders for train and validation
+    tr_dataset, val_dataset = build_datasets(args.model_type, [tr_split, val_split], args.fr_per_vid, list(transforms))
+    dataloaders = train_val_dloaders(tr_dataset, val_dataset, args.batch_size, args.model_type, args.num_workers)
+
+    # Define the loss function, optimizer, and learning rate scheduler
+    loss_func = nn.CrossEntropyLoss(reduction='sum')
+    opt = optim.Adam(get_param_groups(model, args.model_type, args.learning_rate, args.backbone_lr))
+    lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
+
+    # Main training procedure
+    model.to(device)
+    train(dataloaders, model, loss_func, opt, lr_scheduler, device,
+          TrainConfig(output_dir, args.n_epochs, args.amp, args.early_stopping_patience))
+
+
+def run_eval(args, model, transform, device):
+    """
+    Evaluate a trained checkpoint on the test (or validation) split saved next to it.
+
+    Prints the accuracy, saves the per-video class probabilities ('<split>_predictions.npz') next to
+    the checkpoint (e.g. for two-stream late fusion), and logs the results to W&B.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments.
+        model (torch.nn.Module): The model to load the checkpoint into.
+        transform (callable): Validation/test transform.
+        device (torch.device): Device (CPU or GPU) on which to evaluate.
+    """
+    # Load the dataset splits saved next to the checkpoint during training
+    ckpt_dir = os.path.dirname(args.ckpt)
+    splits = np.load(os.path.join(ckpt_dir, 'splits.npy'), allow_pickle=True).item()
+    split_name = args.eval_split
+    eval_split = [(sample[0], int(sample[1])) for sample in splits[split_name]]
+
+    # Create PyTorch Dataset and DataLoader for the evaluated split
+    eval_dataset, = build_datasets(args.model_type, [eval_split], args.fr_per_vid, [transform])
+    dataloader = test_dloaders(eval_dataset, args.batch_size, args.model_type, args.num_workers)['test']
+
+    # Load the trained model checkpoint
+    model.load_state_dict(torch.load(args.ckpt))
+    model.to(device)
+    targets, outputs, accuracy, probs = test(model, dataloader, device, args.amp)
+
+    print(f'The overall {split_name} accuracy is {100 * accuracy:.4f}%.')
+
+    # Save per-video class probabilities; streams evaluated on the same split can be fused
+    # by averaging their probabilities per video key
+    np.savez(os.path.join(ckpt_dir, f'{split_name}_predictions.npz'),
+             video_keys=np.array([video_key(vid_path) for vid_path, _ in eval_split]),
+             labels=np.array(targets), probs=probs)
+
+    log_eval_results(split_name, targets, outputs, accuracy, class_names(splits))
+
+
+def class_names(splits):
+    """
+    Recover the class names, ordered by label, from the saved split paths (<frame_dir>/<class>/<video>).
+
+    Args:
+        splits (dict): Splits as saved in splits.npy ({'train': ..., 'val': ..., 'test': ...}).
+
+    Returns:
+        list: Class names, where the i-th name belongs to label i.
+    """
+    labels_dict = {}
+    for split in splits.values():
+        for vid_path, label in split:
+            labels_dict[os.path.basename(os.path.dirname(vid_path))] = int(label)
+    return sorted(labels_dict, key=labels_dict.get)
+
+
+def log_eval_results(split_name, targets, outputs, accuracy, all_cats):
+    """
+    Log the accuracy, per-class report and confusion matrix of an evaluated split to W&B.
+
+    Args:
+        split_name (str): 'test' or 'val' (used as the W&B key prefix).
+        targets (list): Ground truth labels.
+        outputs (list): Predicted labels.
+        accuracy (float): Overall accuracy.
+        all_cats (list): Class names, ordered by label.
+    """
+    report = get_test_report(targets, outputs, all_cats)
+    report_table = wandb.Table(columns=['class', 'precision', 'recall', 'f1-score', 'support'])
+    for cat in all_cats:
+        report_table.add_data(cat, *[report[cat][k] for k in ['precision', 'recall', 'f1-score', 'support']])
+    wandb.log({
+        f'{split_name}/accuracy': accuracy,
+        f'{split_name}/classification_report': report_table,
+        f'{split_name}/confusion_matrix': wandb.plot.confusion_matrix(
+            y_true=targets, preds=outputs, class_names=all_cats),
+    })
+    wandb.run.summary[f'{split_name}/accuracy'] = accuracy
+    wandb.run.summary[f'{split_name}/macro_f1'] = report['macro avg']['f1-score']
+
 
 if __name__ == "__main__":
     main(args_parser())

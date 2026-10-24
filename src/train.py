@@ -7,9 +7,14 @@ updates the best performing model based on validation accuracy, optionally stops
 when the validation loss stops decreasing, and provides helper functions to compute the
 learning rate, batch loss, and epoch loss.
 
+Classes:
+    - TrainConfig: Options of a training run (output folder, epochs, mixed precision, early stopping).
+    - BestModelTracker: Keeps and saves the weights with the best validation accuracy.
+    - EarlyStopping: Counts epochs without a decrease in validation loss.
+
 Functions:
     - train: Runs the training and validation loops over a specified number of epochs.
-    - get_learning_rate: Retrieves the current learning rate from an optimizer.
+    - log_epoch: Logs the metrics of an epoch to the console and W&B.
     - get_learning_rates: Retrieves the current learning rate of every named parameter group.
     - batch_correct_preds: Computes the number of correct predictions in a mini-batch.
     - get_batch_loss: Computes the loss for a mini-batch and performs backpropagation.
@@ -18,20 +23,94 @@ Functions:
 
 import os
 import copy
+from dataclasses import dataclass
+from typing import Optional
+
 from tqdm import tqdm
 import torch
 import wandb
 
-def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_model_wts_dir, n_epochs=30, amp=False,
-          early_stopping_patience=None):
+
+@dataclass
+class TrainConfig:
+    """
+    Options of a training run.
+
+    Attributes:
+        output_dir (str): Directory to save the best model weights.
+        n_epochs (int): Maximum number of training epochs. Default is 30.
+        amp (bool): Use automatic mixed precision (float16) on CUDA. Default is False.
+        early_stopping_patience (int, optional): Stop after this many consecutive epochs without a
+            decrease in validation loss. Default is None (always train for n_epochs).
+    """
+    output_dir: str
+    n_epochs: int = 30
+    amp: bool = False
+    early_stopping_patience: Optional[int] = None
+
+
+class BestModelTracker:
+    """
+    Keeps the model weights with the best validation accuracy and saves them to disk.
+
+    Args:
+        model (torch.nn.Module): The model being trained (its initial weights are the first "best").
+        output_dir (str): Directory to save the best model weights to (as best_model_wts.pt).
+    """
+    def __init__(self, model, output_dir):
+        self.best_accuracy = 0.0
+        self.best_weights = copy.deepcopy(model.state_dict())
+        self.path = os.path.join(output_dir, 'best_model_wts.pt')
+
+    def update(self, model, val_accuracy, epoch):
+        """Save the model weights if val_accuracy is higher than the best so far."""
+        if val_accuracy > self.best_accuracy:
+            self.best_accuracy = val_accuracy
+            self.best_weights = copy.deepcopy(model.state_dict())
+            torch.save(self.best_weights, self.path)
+            print(f'Best model weights are updated at epoch {epoch}!')
+
+    def restore(self, model):
+        """Load the best weights so far into the model."""
+        model.load_state_dict(self.best_weights)
+
+
+class EarlyStopping:
+    """
+    Counts consecutive epochs without a decrease in validation loss.
+
+    Args:
+        patience (int, optional): Number of such epochs after which training should stop.
+            Default is None (never stop early; the best validation loss is still tracked).
+    """
+    def __init__(self, patience=None):
+        self.patience = patience
+        self.best_loss = float('inf')
+        self.epochs_since_best = 0
+
+    def update(self, val_loss):
+        """Record the validation loss of an epoch."""
+        if val_loss < self.best_loss:
+            self.best_loss, self.epochs_since_best = val_loss, 0
+        else:
+            self.epochs_since_best += 1
+
+    @property
+    def should_stop(self):
+        """True once the validation loss has not decreased for `patience` epochs."""
+        return bool(self.patience) and self.epochs_since_best >= self.patience
+
+
+def train(dataloaders, model, criterion, optimizer, scheduler, device, config):
     """
     Train and validate the model over a given number of epochs.
 
     This function performs the training loop for a video classification model.
     It iterates through the specified number of epochs, updates model weights
     using backpropagation, and evaluates model performance on a validation set.
-    The model with the best validation accuracy is saved to disk. If early_stopping_patience is
-    set, training stops once the validation loss has not decreased for that many epochs in a row.
+    The model with the best validation accuracy is saved to disk. When the scheduler lowers the
+    learning rate, the best weights so far are reloaded. If config.early_stopping_patience is set,
+    training stops once the validation loss has not decreased for that many epochs in a row.
 
     Args:
         dataloaders (dict): Dictionary containing 'train' and 'val' DataLoaders.
@@ -41,104 +120,74 @@ def train(dataloaders, model, criterion, optimizer, scheduler, device, optim_mod
         scheduler (torch.optim.lr_scheduler): Learning rate scheduler, which adjusts the learning rate based on
             validation loss.
         device (torch.device): Device (CPU or GPU) on which to perform training.
-        optim_model_wts_dir (str): Directory to save the best model weights.
-        n_epochs (int, optional): Maximum number of training epochs. Default is 30.
-        amp (bool, optional): Use automatic mixed precision (float16) on CUDA. Default is False.
-        early_stopping_patience (int, optional): Stop after this many consecutive epochs without a
-            decrease in validation loss. Default is None (always train for n_epochs).
+        config (TrainConfig): Output folder, number of epochs, mixed precision and early stopping options.
 
     Returns:
-        tuple: (model, loss_hist, acc_hist)
-            - model (torch.nn.Module): The trained model loaded with the best validation weights.
-            - loss_hist (dict): Dictionary containing lists of training and validation losses for each epoch.
-            - acc_hist (dict): Dictionary containing lists of training and validation accuracies for each epoch.
+        torch.nn.Module: The trained model loaded with the best validation weights.
     """
-    loss_hist = {'train': [], 'val': []}
-    acc_hist = {'train': [], 'val': []}
+    best = BestModelTracker(model, config.output_dir)
+    stopper = EarlyStopping(config.early_stopping_patience)
+    scaler = torch.amp.GradScaler(device.type, enabled=config.amp)
 
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_val_acc = 0.0
-    best_val_loss, epochs_since_best_loss = float('inf'), 0
-    scaler = torch.amp.GradScaler(device.type, enabled=amp)
-
-    for epoch in range(n_epochs):
-        current_lr = get_learning_rate(optimizer)
-        print(f'Epoch {epoch + 1}/{n_epochs}; Current learning rate(s) {get_learning_rates(optimizer)}')
+    for epoch in range(1, config.n_epochs + 1):
+        lrs = get_learning_rates(optimizer)
+        print(f'Epoch {epoch}/{config.n_epochs}; Current learning rate(s) {lrs}')
 
         # Training phase
         model.train()
         train_loss, train_accuracy = get_epoch_loss(model, criterion, dataloaders['train'], device, optimizer,
-                                                    scaler, amp)
-        loss_hist['train'].append(train_loss)
-        acc_hist['train'].append(train_accuracy)
+                                                    scaler, config.amp)
 
         # Validation phase
         model.eval()
         with torch.no_grad():
-            val_loss, val_accuracy = get_epoch_loss(model, criterion, dataloaders['val'], device, amp=amp)
-        if val_accuracy > best_val_acc:
-            best_val_acc = val_accuracy
-            best_model_wts = copy.deepcopy(model.state_dict())
-            best_model_name = 'best_model_wts.pt'
-            best_model_path = os.path.join(optim_model_wts_dir, best_model_name)
-            torch.save(best_model_wts, best_model_path)
-            print(f'Best model weights are updated at epoch {epoch + 1}!')
-        loss_hist['val'].append(val_loss)
-        acc_hist['val'].append(val_accuracy)
+            val_loss, val_accuracy = get_epoch_loss(model, criterion, dataloaders['val'], device, amp=config.amp)
+        best.update(model, val_accuracy, epoch)
+        stopper.update(val_loss)
 
-        # Track epochs without a decrease in validation loss for early stopping
-        if val_loss < best_val_loss:
-            best_val_loss, epochs_since_best_loss = val_loss, 0
-        else:
-            epochs_since_best_loss += 1
-
-        # Update learning rate based on validation loss
-        lrs = get_learning_rates(optimizer)
+        # Update learning rate based on validation loss; restart from the best weights when it drops
         scheduler.step(val_loss)
-        if current_lr != get_learning_rate(optimizer):
+        if get_learning_rates(optimizer) != lrs:
             print('Loading best model weights!')
-            model.load_state_dict(best_model_wts)
+            best.restore(model)
 
-        # Log epoch metrics to W&B (no-op if wandb.init was not called)
-        if wandb.run is not None:
-            wandb.log({
-                'epoch': epoch + 1,
-                **{'lr/' + name: lr for name, lr in lrs.items()},
-                'train/loss': train_loss,
-                'train/accuracy': train_accuracy,
-                'val/loss': val_loss,
-                'val/accuracy': val_accuracy,
-                'val/best_accuracy': best_val_acc,
-                'val/best_loss': best_val_loss,
-            })
+        log_epoch(epoch, lrs, {
+            'train/loss': train_loss,
+            'train/accuracy': train_accuracy,
+            'val/loss': val_loss,
+            'val/accuracy': val_accuracy,
+            'val/best_accuracy': best.best_accuracy,
+            'val/best_loss': stopper.best_loss,
+        })
 
-        print(f"train loss: {train_loss:.6f}, val loss: {val_loss:.6f}, accuracy: {100 * val_accuracy:.2f}")
-        print("-" * 60)
-        print()
-
-        if early_stopping_patience and epochs_since_best_loss >= early_stopping_patience:
-            print(f'Early stopping at epoch {epoch + 1}: validation loss has not decreased for '
-                  f'{early_stopping_patience} epochs.')
+        if stopper.should_stop:
+            print(f'Early stopping at epoch {epoch}: validation loss has not decreased for '
+                  f'{config.early_stopping_patience} epochs.')
             if wandb.run is not None:
-                wandb.run.summary['early_stopped_epoch'] = epoch + 1
+                wandb.run.summary['early_stopped_epoch'] = epoch
             break
 
     # Load the best model weights before returning the model
-    model.load_state_dict(best_model_wts)
-    return model, loss_hist, acc_hist
+    best.restore(model)
+    return model
 
-def get_learning_rate(optimizer):
+
+def log_epoch(epoch, lrs, metrics):
     """
-    Retrieve the current learning rate from the optimizer.
+    Log the metrics of an epoch to W&B (if a run is active) and print a summary line.
 
     Args:
-        optimizer (torch.optim.Optimizer): The optimizer from which to get the learning rate.
-
-    Returns:
-        float: The current learning rate.
+        epoch (int): Epoch number (starting at 1).
+        lrs (dict): Learning rate of each parameter group during the epoch.
+        metrics (dict): Metrics keyed by their W&B name ('train/loss', 'val/accuracy', ...).
     """
-    for param_group in optimizer.param_groups:
-        return param_group['lr']
+    if wandb.run is not None:
+        wandb.log({'epoch': epoch, **{'lr/' + name: lr for name, lr in lrs.items()}, **metrics})
+
+    print(f"train loss: {metrics['train/loss']:.6f}, val loss: {metrics['val/loss']:.6f}, "
+          f"accuracy: {100 * metrics['val/accuracy']:.2f}")
+    print("-" * 60)
+    print()
 
 def get_learning_rates(optimizer):
     """
