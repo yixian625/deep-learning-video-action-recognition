@@ -15,12 +15,13 @@ from video_datasets import VideoDataset
 
 
 def test_random_augmentation_is_identical_for_all_frames_of_a_video(tmp_path):
+    """The random flip and shift are the same for every frame of a video, over 10 random seeds."""
     # Identical frames with a horizontal gradient, so a flip or shift changes the frame
     vid_dir = tmp_path / 'Class0' / 'v_Class0_g01_c01'
     vid_dir.mkdir(parents=True)
     img = np.tile(np.linspace(0, 255, 320, dtype=np.uint8), (240, 1))
     for i in range(8):
-        Image.fromarray(np.stack([img] * 3, axis=-1)).save(vid_dir / 'frame{}.jpg'.format(i))
+        Image.fromarray(np.stack([img] * 3, axis=-1)).save(vid_dir / f'frame{i}.jpg')
 
     tr_transforms, _ = compose_data_transforms(*transform_stats('lrcn'))
     dataset = VideoDataset([(str(vid_dir), 0)], 8, tr_transforms)

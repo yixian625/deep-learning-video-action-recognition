@@ -13,24 +13,26 @@ import pytest
 from video_datasets import dataset_split, get_video_group
 
 
-@pytest.fixture(scope='module')
-def splits():
+@pytest.fixture(name='splits', scope='module')
+def fixture_splits():
     """Split a UCF50-style dataset of 5 classes x 25 groups x 4 clips (no files needed)."""
     vid_dataset = {}
     for label in range(5):
-        cat = 'Class{}'.format(label)
+        cat = f'Class{label}'
         for g in range(1, 26):
             for c in range(1, 5):
-                vid_dataset[os.path.join('frames', cat, 'v_{}_g{:02d}_c{:02d}'.format(cat, g, c))] = label
+                vid_dataset[os.path.join('frames', cat, f'v_{cat}_g{g:02d}_c{c:02d}')] = label
     return dataset_split(vid_dataset, tr_ratio=0.8, ts_ratio=0.1, seed=0)
 
 
 def test_clips_of_the_same_source_video_share_a_group():
-    paths = [os.path.join('frames', 'Biking', 'v_Biking_g07_c{:02d}'.format(c)) for c in range(1, 6)]
+    """All clips v_<class>_g07_c* of one source video get the same group ID."""
+    paths = [os.path.join('frames', 'Biking', f'v_Biking_g07_c{c:02d}') for c in range(1, 6)]
     assert {get_video_group(p) for p in paths} == {'Biking_g07'}
 
 
 def test_no_source_video_group_is_shared_between_splits(splits):
+    """No source-video group appears in more than one of train, val and test."""
     tr_g, val_g, ts_g = ({get_video_group(path) for path, _ in split} for split in splits)
     assert not tr_g & val_g, 'groups leaked between train and val'
     assert not tr_g & ts_g, 'groups leaked between train and test'

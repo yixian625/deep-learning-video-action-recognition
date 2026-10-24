@@ -65,12 +65,12 @@ def load_aligned(pred_paths):
     labels, probs = None, []
     for path, pred in zip(pred_paths, preds):
         if set(pred['video_keys']) != set(video_keys):
-            raise ValueError('{} was evaluated on different videos than {}'.format(path, pred_paths[0]))
+            raise ValueError(f'{path} was evaluated on different videos than {pred_paths[0]}')
         order = np.argsort(pred['video_keys'])
         if labels is None:
             labels = pred['labels'][order]
         elif not np.array_equal(labels, pred['labels'][order]):
-            raise ValueError('{} has different labels than {}'.format(path, pred_paths[0]))
+            raise ValueError(f'{path} has different labels than {pred_paths[0]}')
         probs.append(pred['probs'][order])
     return video_keys, labels, probs
 
@@ -95,17 +95,16 @@ def choose_weights_on_val(val_pred_paths, grid_step=0.05):
     if len(val_pred_paths) != 2:
         raise ValueError('Choosing weights on the validation set is supported for two streams only.')
     _, labels, probs = load_aligned(val_pred_paths)
-    best = None
+    best_w, best_acc, best_log_loss = 0.0, -1.0, float('inf')
     for w in np.round(np.arange(0, 1 + 1e-9, grid_step), 6):
         fused = (1 - w) * probs[0] + w * probs[1]
         acc = (fused.argmax(1) == labels).mean()
         log_loss = -np.log(fused[np.arange(len(labels)), labels] + 1e-12).mean()
-        if best is None or (acc, -log_loss) > (best[1], -best[2]):
-            best = (w, acc, log_loss)
-    w, acc, _ = best
-    val_results = {'val/stream{}_accuracy'.format(i): (p.argmax(1) == labels).mean() for i, p in enumerate(probs)}
-    val_results['val/fused_accuracy'] = acc
-    return np.array([1 - w, w]), val_results
+        if (acc, -log_loss) > (best_acc, -best_log_loss):
+            best_w, best_acc, best_log_loss = w, acc, log_loss
+    val_results = {f'val/stream{i}_accuracy': (p.argmax(1) == labels).mean() for i, p in enumerate(probs)}
+    val_results['val/fused_accuracy'] = best_acc
+    return np.array([1 - best_w, best_w]), val_results
 
 
 def main(args):
@@ -115,12 +114,12 @@ def main(args):
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
     """
-    names = args.names or ['stream{}'.format(i) for i in range(len(args.preds))]
+    names = args.names or [f'stream{i}' for i in range(len(args.preds))]
     val_results = {}
     if args.val_preds:
         weights, val_results = choose_weights_on_val(args.val_preds, args.grid_step)
         val_results = {k.replace('stream0', names[0]).replace('stream1', names[1]): v for k, v in val_results.items()}
-        print('Weights chosen on the validation set: {}'.format(dict(zip(names, np.round(weights, 3)))))
+        print(f'Weights chosen on the validation set: {dict(zip(names, np.round(weights, 3)))}')
     else:
         weights = np.array(args.weights or [1.0] * len(args.preds))
     weights = weights / weights.sum()
@@ -128,11 +127,11 @@ def main(args):
     video_keys, labels, probs = load_aligned(args.preds)
     fused = sum(w * p for w, p in zip(weights, probs))
 
-    results = {'test/{}_accuracy'.format(name): (p.argmax(1) == labels).mean() for name, p in zip(names, probs)}
+    results = {f'test/{name}_accuracy': (p.argmax(1) == labels).mean() for name, p in zip(names, probs)}
     results['test/fused_accuracy'] = (fused.argmax(1) == labels).mean()
     results.update(val_results)
     for name, acc in results.items():
-        print('{}: {:.2f}%'.format(name, 100 * acc))
+        print(f'{name}: {100 * acc:.2f}%')
 
     wandb.init(project='video-action-lrcn', job_type='fusion', mode=args.wandb_mode, name=args.run_name,
                tags=['fusion'] + names,
@@ -145,5 +144,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = args_parser()
-    main(args)
+    main(args_parser())

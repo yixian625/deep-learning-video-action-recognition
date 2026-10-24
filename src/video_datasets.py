@@ -9,19 +9,18 @@ load the dataset from a directory structure, split the dataset using stratified 
 and custom collate functions for handling variable-length video sequences.
 """
 
-import torch
-from torch.utils.data import Dataset
-from torchvision import transforms as transforms
-from torchvision import tv_tensors
-from torchvision.io import read_image, ImageReadMode
-from torch.nn.utils.rnn import pad_sequence
-
 import os
 import re
 import glob
-from tqdm import tqdm
+
 import numpy as np
+import torch
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset
+from torchvision import tv_tensors
+from torchvision.io import read_image, ImageReadMode
 from sklearn.model_selection import StratifiedGroupKFold
+from tqdm import tqdm
 
 
 def sorted_frame_paths(vid_dir, prefix=''):
@@ -46,10 +45,10 @@ def sorted_frame_paths(vid_dir, prefix=''):
 class VideoDataset(Dataset):
     """
     PyTorch Dataset class for loading video data from directories of frame images.
-    
+
     Each video is represented as a directory containing JPEG images of its frames.
     The dataset is provided as a dictionary mapping each video directory path to its label.
-    
+
     Args:
         vid_dataset (dict): Dictionary where keys are video directory paths and values are integer labels.
         fr_per_vid (int): Number of frames per video to load (images are taken in order).
@@ -69,10 +68,10 @@ class VideoDataset(Dataset):
         """
         Load frames from the video directory corresponding to the given index, apply transforms,
         and return the stacked tensor of frames along with its label.
-        
+
         Args:
             idx (int): Index of the sample.
-            
+
         Returns:
             tuple: (frames_tensor, label) where frames_tensor is a tensor of shape (T, C, H, W)
                    with T being the number of frames (up to fr_per_vid) and label is an integer.
@@ -81,11 +80,11 @@ class VideoDataset(Dataset):
         # and select up to fr_per_vid frames
         fr_paths = sorted_frame_paths(self.dataset[idx][0])
         fr_paths = fr_paths[:self.fpv]
-        
+
         # Get the label associated with the video
         fr_label = self.dataset[idx][1]
         if not fr_paths:
-            return [], fr_label
+            return torch.empty(0), fr_label  # filtered out by the collate functions
 
         # Load the frames as one uint8 video tensor of shape (T, C, H, W)
         fr_imgs = tv_tensors.Video(torch.stack([read_image(fr_path, mode=ImageReadMode.RGB) for fr_path in fr_paths]))
@@ -137,7 +136,7 @@ class ClipDataset(Dataset):
         """
         fr_paths = sorted_frame_paths(vid_dir)[:self.n_frames]
         if not fr_paths:
-            raise RuntimeError('No frames found in {}'.format(vid_dir))
+            raise RuntimeError(f'No frames found in {vid_dir}')
         frames = [read_image(fr_path, mode=ImageReadMode.RGB) for fr_path in fr_paths]
         frames += [frames[-1]] * (self.n_frames - len(frames))
         return tv_tensors.Video(torch.stack(frames))
@@ -188,7 +187,7 @@ class FlowClipDataset(ClipDataset):
         x_paths = sorted_frame_paths(vid_dir, prefix='flow_x_')[:self.n_frames]
         y_paths = sorted_frame_paths(vid_dir, prefix='flow_y_')[:self.n_frames]
         if not x_paths or len(x_paths) != len(y_paths):
-            raise RuntimeError('Missing flow images in {}'.format(vid_dir))
+            raise RuntimeError(f'Missing flow images in {vid_dir}')
         flows = [torch.cat([read_image(x_path, mode=ImageReadMode.GRAY), read_image(y_path, mode=ImageReadMode.GRAY)])
                  for x_path, y_path in zip(x_paths, y_paths)]
         flows += [flows[-1]] * (self.n_frames - len(flows))
@@ -198,14 +197,14 @@ class FlowClipDataset(ClipDataset):
 def load_dataset(frame_dir):
     """
     Load the full video dataset from the specified directory.
-    
+
     Each subdirectory in frame_dir is assumed to correspond to a video category.
     The function builds a dictionary where keys are paths to video directories and
     values are integer labels corresponding to each category.
-    
+
     Args:
         frame_dir (str): Path to the directory containing subdirectories for each video category.
-    
+
     Returns:
         tuple: (vid_dataset, label_dict)
             - vid_dataset (dict): Dictionary mapping video directory paths to integer labels.
@@ -239,7 +238,7 @@ def get_video_group(vid_path):
     vid_cat = os.path.basename(os.path.dirname(vid_path))
     vid_name = os.path.basename(vid_path)
     match = re.search(r'_g(\d+)_c\d+$', vid_name)
-    return '{}_g{}'.format(vid_cat, match.group(1)) if match else os.path.join(vid_cat, vid_name)
+    return f'{vid_cat}_g{match.group(1)}' if match else os.path.join(vid_cat, vid_name)
 
 
 def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
@@ -263,15 +262,15 @@ def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
             - val_dataset (list): List of (video_path, label) tuples for the validation set.
             - ts_dataset (list): List of (video_path, label) tuples for the test set.
     """
-    vid_paths = np.array([vid_path for vid_path in vid_dataset.keys()])
-    vid_labels = np.array([vid_label for vid_label in vid_dataset.values()])
+    vid_paths = np.array(list(vid_dataset.keys()))
+    vid_labels = np.array(list(vid_dataset.values()))
     vid_groups = np.array([get_video_group(vid_path) for vid_path in vid_paths])
     print('Splitting train/validation/test datasets....')
 
     # Test split: hold out one of round(1 / ts_ratio) stratified group folds
     ts_spliter = StratifiedGroupKFold(n_splits=round(1 / ts_ratio), shuffle=True, random_state=seed)
     tr_val_idx, ts_idx = next(ts_spliter.split(vid_paths, vid_labels, vid_groups))
-    ts_dataset = [(ts_path, ts_label) for ts_path, ts_label in zip(vid_paths[ts_idx], vid_labels[ts_idx])]
+    ts_dataset = list(zip(vid_paths[ts_idx], vid_labels[ts_idx]))
     tr_val_paths, tr_val_labels, tr_val_groups = vid_paths[tr_val_idx], vid_labels[tr_val_idx], vid_groups[tr_val_idx]
 
     # Train/validation split on the remaining groups
@@ -279,8 +278,8 @@ def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
     val_wt = val_ratio / (tr_ratio + val_ratio)
     val_spliter = StratifiedGroupKFold(n_splits=round(1 / val_wt), shuffle=True, random_state=seed)
     tr_idx, val_idx = next(val_spliter.split(tr_val_paths, tr_val_labels, tr_val_groups))
-    tr_dataset = [(tr_path, tr_label) for tr_path, tr_label in zip(tr_val_paths[tr_idx], tr_val_labels[tr_idx])]
-    val_dataset = [(val_path, val_label) for val_path, val_label in zip(tr_val_paths[val_idx], tr_val_labels[val_idx])]
+    tr_dataset = list(zip(tr_val_paths[tr_idx], tr_val_labels[tr_idx]))
+    val_dataset = list(zip(tr_val_paths[val_idx], tr_val_labels[val_idx]))
 
     return tr_dataset, val_dataset, ts_dataset
 
@@ -288,15 +287,15 @@ def dataset_split(vid_dataset, tr_ratio, ts_ratio, seed=0):
 def collate_fn_r3d_18(batch):
     """
     Collate function for 3D CNN models (e.g., R3D-18).
-    
+
     Assumes each sample in the batch is a tuple (video_frames, label),
     where video_frames is a tensor of shape (T, C, H, W). This function filters out any samples
     with no frames, stacks the video frame tensors, transposes the tensor dimensions as needed,
     and stacks the labels.
-    
+
     Args:
         batch (list): List of samples, each as (video_frames, label).
-    
+
     Returns:
         tuple: (imgs_tensor, labels_tensor)
             - imgs_tensor (Tensor): Stacked video frames tensor with shape adjusted for R3D-18.
@@ -314,15 +313,15 @@ def collate_fn_r3d_18(batch):
 def collate_fn_rnn(batch):
     """
     Collate function for RNN-based models.
-    
+
     Handles variable-length video sequences by padding them to the length of the longest sequence
     in the batch. Each sample in the batch is expected to be a tuple (video_frames, label),
     where video_frames is a tensor of shape (T, C, H, W). The function returns a padded tensor
     of video frames with shape (batch_size, max_T, C, H, W) and a tensor of labels.
-    
+
     Args:
         batch (list): List of samples, each as (video_frames, label).
-    
+
     Returns:
         tuple: (padded_imgs, labels_tensor)
             - padded_imgs (Tensor): Padded tensor of video frames.
@@ -330,18 +329,18 @@ def collate_fn_rnn(batch):
     """
     # Unzip the batch into image tensors and labels
     imgs_batch, label_batch = list(zip(*batch))
-    
+
     # Filter out any samples that have no frames
     valid_samples = [(imgs, label) for imgs, label in zip(imgs_batch, label_batch) if len(imgs) > 0]
     if not valid_samples:
         return None, None
     imgs_batch, label_batch = zip(*valid_samples)
-    
+
     # Pad the video frame tensors along the time dimension (T)
     # Resulting shape: (batch_size, max_T, C, H, W)
     padded_imgs = pad_sequence(imgs_batch, batch_first=True)
-    
+
     # Convert labels to a tensor
     labels_tensor = torch.tensor(label_batch)
-    
+
     return padded_imgs, labels_tensor

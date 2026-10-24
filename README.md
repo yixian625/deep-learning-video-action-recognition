@@ -265,6 +265,41 @@ The best model is the RGB stream (94.9% test). The flow stream is likely held ba
 
 ---
 
+## Project Structure
+
+```
+src/                         Python source
+  preprocess.py              extract frames (uniform for LRCN, dense clips for S3D)
+  compute_flow.py            RAFT optical flow for the two-stream flow stream
+  run.py                     main entry point: train or evaluate a model
+  train.py                   training loop (early stopping, W&B logging)
+  evaluate.py                evaluation and classification report
+  fuse.py                    late fusion of two streams' predictions
+  models.py                  LRCN, S3D (RGB and flow) and the model factory
+  video_datasets.py          datasets, group-aware train/val/test split, collate functions
+  utils.py                   frame sampling, transforms and DataLoaders
+bash/                        training, testing and fusion scripts (see the sections above)
+test/                        regression tests for the fixed bugs
+data/                        datasets, extracted frames, clips and flow (git-ignored)
+models/                      checkpoints, splits and predictions per model (git-ignored)
+.pylintrc                    pylint settings
+pytest.ini                   pytest settings
+```
+
+The scripts in `bash/` change to the repo root first, so they can be run from any folder (e.g. `bash bash/train.sh`). They call `python`, so activate the `.venv` first. To run the tests:
+
+```bash
+python -m pytest
+```
+
+To lint the code with pylint (settings, with the reason for each, are in `.pylintrc`):
+
+```bash
+python -m pylint src test
+```
+
+---
+
 ## Final Results
 
 All results are on the same test set: 670 UCF50 clips from source videos that none of the models saw during training or validation (the group-aware 80/10/10 split). Each row is a single training run without a fixed seed.

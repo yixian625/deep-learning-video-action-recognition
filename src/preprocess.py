@@ -36,13 +36,18 @@ def args_parser():
         argparse.Namespace: Parsed command-line arguments.
     """
     parser = argparse.ArgumentParser(description='Extract frames from videos')
-    parser.add_argument('-vd', '--video_dir', default='data/UCF50', help='Directory of class subdirectories containing videos')
-    parser.add_argument('-fd', '--frame_dir', default='data/UCF50_frames', help='Directory for storing extracted frames')
+    parser.add_argument('-vd', '--video_dir', default='data/UCF50',
+                        help='Directory of class subdirectories containing videos')
+    parser.add_argument('-fd', '--frame_dir', default='data/UCF50_frames',
+                        help='Directory for storing extracted frames')
     parser.add_argument('-nf', '--n_frames', type=int, default=16, help='Number of frames to sample per video')
-    parser.add_argument('-nw', '--n_workers', type=int, default=os.cpu_count(), help='Number of parallel worker processes')
+    parser.add_argument('-nw', '--n_workers', type=int, default=os.cpu_count(),
+                        help='Number of parallel worker processes')
     parser.add_argument('-s', '--sampling', default='uniform', choices=['uniform', 'dense'],
-                        help="'uniform': spread over the whole video (LRCN); 'dense': consecutive strided clip (3D CNN)")
-    parser.add_argument('--stride', type=int, default=2, help='Temporal stride between clip frames (dense sampling only)')
+                        help="'uniform': spread over the whole video (LRCN); "
+                             "'dense': consecutive strided clip (3D CNN)")
+    parser.add_argument('--stride', type=int, default=2,
+                        help='Temporal stride between clip frames (dense sampling only)')
     return parser.parse_args()
 
 
@@ -80,7 +85,7 @@ def main(args):
             if not glob.glob(os.path.join(store_path, '*.jpg')):
                 jobs.append((vid_path, store_path))
 
-    print('Extracting frames from {} videos....'.format(len(jobs)))
+    print(f'Extracting frames from {len(jobs)} videos....')
     with ProcessPoolExecutor(max_workers=args.n_workers) as executor:
         futures = [executor.submit(extract_video, vid_path, store_path, args.n_frames, args.sampling, args.stride)
                    for vid_path, store_path in jobs]
@@ -89,5 +94,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = args_parser()
-    main(args)
+    main(args_parser())

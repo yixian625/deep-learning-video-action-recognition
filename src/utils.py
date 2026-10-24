@@ -1,13 +1,14 @@
 """
 Module: utils.py
 
-This module provides helper functions for video processing and data transformations 
+This module provides helper functions for video processing and data transformations
 for video classification tasks. It includes functions for:
     - Uniformly sampling frames from videos.
     - Sampling a clip of consecutive (strided) frames from videos, for 3D CNNs.
     - Storing extracted frames as JPEG images.
     - Retrieving image transformation statistics based on the model type.
-    - Composing video-level (LRCN), clip-level (3D CNN) and optical flow data transforms for training and validation/test datasets.
+    - Composing video-level (LRCN), clip-level (3D CNN) and optical flow data transforms for training and
+      validation/test datasets.
     - Creating DataLoaders for training, validation, and testing, using custom collate functions.
 """
 
@@ -16,7 +17,6 @@ import cv2
 import numpy as np
 
 import torch
-from torchvision import transforms as transforms
 from torchvision.transforms import v2
 from torch.utils.data import DataLoader
 from video_datasets import collate_fn_r3d_18, collate_fn_rnn
@@ -34,7 +34,7 @@ def get_frames(vid, n_frames=1):
         tuple: (frames, v_len)
             - frames (list): List of sampled frames (as numpy arrays in RGB format).
             - v_len (int): Total number of frames in the video.
-            
+
     Notes:
         - If the video cannot be opened or contains no frames, an empty list and 0 are returned.
         - Frames are sampled at uniformly spaced indices.
@@ -129,7 +129,7 @@ def store_frames(frames, store_path):
     for idx, frame in enumerate(frames):
         print("processing")
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        path_to_frame = os.path.join(store_path, "frame{}.jpg".format(idx))
+        path_to_frame = os.path.join(store_path, f"frame{idx}.jpg")
         cv2.imwrite(path_to_frame, frame)
 
 
@@ -180,9 +180,9 @@ def compose_data_transforms(height, width, mean, std):
     """
     Compose and return data transforms for training and validation/test datasets (LRCN).
 
-    The training transforms include data augmentation such as random horizontal flipping and random affine transformations,
-    while the validation/test transforms consist solely of resizing, converting to float, and normalizing.
-    The transforms operate on a whole video (a uint8 video tensor of shape (T, C, H, W)), so every random
+    The training transforms include data augmentation such as random horizontal flipping and random affine
+    transformations, while the validation/test transforms consist solely of resizing, converting to float, and
+    normalizing. The transforms operate on a whole video (a uint8 video tensor of shape (T, C, H, W)), so every random
     parameter (flip, translation) is drawn once per video and applied identically to all of its frames.
 
     Args:
@@ -360,27 +360,3 @@ def test_dloaders(test_dataset, batch_size, model='lrcn', num_workers=0):
                          collate_fn=collate_fn, num_workers=num_workers)
     dataloaders = {'test': test_dl}
     return dataloaders
-
-
-def compose_dataloaders(train_dataset, val_dataset, test_dataset, batch_size, model='lrcn', num_workers=0):
-    """
-    Create DataLoaders for training, validation, and test datasets.
-
-    Combines train_val_dloaders and test_dloaders so that all three splits use the
-    collate function matching the model type.
-
-    Args:
-        train_dataset (Dataset): PyTorch Dataset for training data.
-        val_dataset (Dataset): PyTorch Dataset for validation data.
-        test_dataset (Dataset): PyTorch Dataset for test data.
-        batch_size (int): Number of samples per batch.
-        model (str): Model type; 'lrcn' for RNN-based models, otherwise for 3D CNNs.
-        num_workers (int, optional): Number of DataLoader worker processes. Default is 0 (load in the main process).
-
-    Returns:
-        dict: Dictionary with keys 'train', 'val' and 'test' mapping to their respective DataLoaders.
-    """
-    dataloaders = train_val_dloaders(train_dataset, val_dataset, batch_size, model, num_workers)
-    dataloaders.update(test_dloaders(test_dataset, batch_size, model, num_workers))
-    return dataloaders
-

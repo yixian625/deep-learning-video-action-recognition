@@ -22,31 +22,31 @@ Functions:
 """
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torchvision import models
 from torchvision.models.video import s3d, S3D_Weights
 
 class Identity(nn.Module):
     """
     A placeholder identity operator that is argument-insensitive.
-    
+
     This module is used to replace the fully-connected (fc) layer in the ResNet backbone,
     effectively making the backbone output the raw features before classification.
-    
+
     Example:
         >>> identity = Identity()
         >>> output = identity(input_tensor)
     """
     def __init__(self):
-        super(Identity, self).__init__()
+        super().__init__()
 
     def forward(self, x):
         """
         Forward pass that returns the input as is.
-        
+
         Args:
             x (Tensor): Input tensor.
-        
+
         Returns:
             Tensor: The same tensor x.
         """
@@ -55,7 +55,7 @@ class Identity(nn.Module):
 class LRCN(nn.Module):
     """
     LRCN (Long-term Recurrent Convolutional Network) for video classification.
-    
+
     This model uses a ResNet backbone as a 2D CNN to extract spatial features from each video frame.
     An LSTM network is then used to model the temporal dynamics across the sequence of frame features.
     Dropout is applied before the final fully-connected layer that produces class logits.
@@ -69,12 +69,12 @@ class LRCN(nn.Module):
         cnn_model (str, optional): Specifies the ResNet variant to use as the backbone.
                                    Options: 'resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'.
                                    Default is 'resnet34'.
-    
+
     Raises:
         ValueError: If the specified cnn_model is not supported.
     """
     def __init__(self, hidden_size, n_layers, dropout_rate, n_classes, pretrained=True, cnn_model='resnet34'):
-        super(LRCN, self).__init__()
+        super().__init__()
 
         # Set up the ResNet backbone as a 2D CNN feature extractor.
         if cnn_model == 'resnet18':
@@ -93,7 +93,7 @@ class LRCN(nn.Module):
 
         # Retrieve the number of features output by the CNN's original fully-connected layer.
         num_features = base_cnn.fc.in_features
-        
+
         # Replace the original fc layer with an identity mapping so that raw features are returned.
         base_cnn.fc = Identity()
         self.base_model = base_cnn
@@ -102,20 +102,20 @@ class LRCN(nn.Module):
         # batch_first=True: input is (batch_size, time_steps, features), so the LSTM steps over time
         # within each video instead of over the videos in a batch.
         self.rnn = nn.LSTM(num_features, hidden_size, n_layers, batch_first=True)
-        
+
         # Define dropout for regularization.
         self.dropout = nn.Dropout(dropout_rate)
-        
+
         # Final fully-connected layer to produce logits for each class.
         self.fc = nn.Linear(hidden_size, n_classes)
 
     def forward(self, x):
         """
         Forward pass for the LRCN model.
-        
+
         The input tensor x is expected to have the shape:
             (batch_size, time_steps, channels, height, width)
-        
+
         The CNN backbone extracts features from all frames at once. The per-video sequences of frame
         features are then passed through the LSTM, which steps over time independently for each video.
         The output from the last time step is then passed through dropout and the final fully-connected
@@ -128,17 +128,17 @@ class LRCN(nn.Module):
             Tensor: Output logits for each sample in the batch with shape (batch_size, n_classes).
         """
         bs, ts, c, h, w = x.shape  # batch_size, time_steps, channels, height, width
-        
+
         # Extract features for every frame of every video in one pass, then restore the time axis.
         y = self.base_model(x.reshape(bs * ts, c, h, w))
         y = y.reshape(bs, ts, -1)  # (batch_size, time_steps, features)
 
         # Run the LSTM over the time steps of each video.
         out, _ = self.rnn(y)
-        
+
         # Apply dropout to the output of the final time step.
         out = self.dropout(out[:, -1])
-        
+
         # Pass the final output through the fully-connected layer to get class logits.
         out = self.fc(out)
         return out

@@ -21,7 +21,7 @@ the following:
       class probabilities (test_predictions.npz) next to the checkpoint, e.g. for two-stream late fusion.
       With --eval_split val, it evaluates the validation set instead (val_predictions.npz), e.g. to
       choose fusion weights without using the test set.
-    
+
 The module also includes a helper function for parsing command-line arguments.
 """
 
@@ -29,9 +29,8 @@ import os
 import argparse
 
 import torch
-import torch.nn as nn
-from torch import optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch import nn, optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import numpy as np
 import wandb
@@ -41,7 +40,7 @@ from utils import (transform_stats, compose_data_transforms, compose_clip_transf
                    train_val_dloaders, test_dloaders)
 from models import build_model, get_param_groups
 from train import train
-from test import test, get_test_report, get_confusion_matrix
+from evaluate import test, get_test_report
 
 def args_parser():
     """
@@ -49,7 +48,7 @@ def args_parser():
 
     Returns:
         argparse.Namespace: Parsed command-line arguments.
-        
+
     Arguments include:
         -fd/--frame_dir: Directory for storing video frames.
         -trs/--train_size: Proportion of data to use for training (default 0.8).
@@ -83,14 +82,18 @@ def args_parser():
     parser.add_argument('-trs', '--train_size', type=float, default=0.8, help='Train set size')
     parser.add_argument('-tss', '--test_size', type=float, default=0.1, help='Test set size')
     parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
-    parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
+    parser.add_argument('-nc', '--n_classes', type=int,
+                        help='Number of classes for the classification task', required=True)
 
     parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
     parser.add_argument('-mt', '--model_type', default='lrcn', choices=['lrcn', 's3d', 's3d_flow'],
                         help='LRCN (2D CNN + LSTM), S3D (3D CNN) on RGB, or S3D on optical flow')
-    parser.add_argument('-cnn', '--cnn_backbone', default='resnet34', help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
-    parser.add_argument('-p', '--pretrained', help='Use pretrained weights (ImageNet for LRCN, Kinetics-400 for S3D)', default=True)
-    parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
+    parser.add_argument('-cnn', '--cnn_backbone', default='resnet34',
+                        help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
+    parser.add_argument('-p', '--pretrained',
+                        help='Use pretrained weights (ImageNet for LRCN, Kinetics-400 for S3D)', default=True)
+    parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100,
+                        help='Number of neurons in the RNN/LSTM hidden layer')
     parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1, help='Number of RNN/LSTM layers')
 
     parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
@@ -102,10 +105,12 @@ def args_parser():
                         help='Learning rate of the pretrained backbone (default: same as --learning_rate)')
     parser.add_argument('-ne', '--n_epochs', type=int, default=30, help='Maximum number of training epochs')
     parser.add_argument('-es', '--early_stopping_patience', type=int,
-                        help='Stop after this many consecutive epochs without a decrease in validation loss (default: off)')
+                        help='Stop after this many consecutive epochs without a decrease in validation loss '
+                             '(default: off)')
     parser.add_argument('-wm', '--wandb_mode', default='online', choices=['online', 'offline', 'disabled'],
                         help='Weights & Biases logging mode')
-    parser.add_argument('-od', '--output_dir', help="Directory for model weights and splits (default './models/<model_type>')")
+    parser.add_argument('-od', '--output_dir',
+                        help="Directory for model weights and splits (default './models/<model_type>')")
     parser.add_argument('-nw', '--num_workers', type=int, default=0, help='Number of DataLoader worker processes')
     parser.add_argument('--amp', action='store_true', help='Use automatic mixed precision on CUDA')
     parser.add_argument('-rn', '--run_name', help="W&B run name (default '<model_type>-<mode>')")
@@ -192,7 +197,7 @@ def main(args):
 
     # Start a Weights & Biases run to track this experiment
     wandb.init(project='video-action-lrcn', job_type=mode, config=vars(args), mode=args.wandb_mode,
-               name=args.run_name or '{}-{}'.format(model_type, mode), tags=[model_type])
+               name=args.run_name or f'{model_type}-{mode}', tags=[model_type])
 
     # Load transformation statistics and create data augmentation transforms
     # (video-level for LRCN, clip-level for S3D, flow-aware for the flow stream)
@@ -208,7 +213,7 @@ def main(args):
 
     if mode == 'train':
         # Load dataset and split into train/validation/test
-        vid_dataset, label_dict = load_dataset(frame_dir)
+        vid_dataset, _ = load_dataset(frame_dir)
         tr_split, val_split, ts_split = dataset_split(vid_dataset, tr_size, ts_size)
 
         # Save the splits next to the model weights for reproducibility and later use in evaluation
@@ -230,8 +235,8 @@ def main(args):
 
         # Main training procedure
         model.to(device)
-        model, loss_hist, acc_hist = train(dataloaders, model, loss_func, opt, lr_scheduler, device, output_dir, n_epochs, amp,
-                                           args.early_stopping_patience)
+        train(dataloaders, model, loss_func, opt, lr_scheduler, device, output_dir, n_epochs, amp,
+              args.early_stopping_patience)
 
     elif mode == 'eval':
         # Load the dataset splits saved next to the checkpoint during training
@@ -250,11 +255,11 @@ def main(args):
         model.to(device)
         targets, outputs, accuracy, probs = test(model, dataloaders['test'], device, amp)
 
-        print('The overall {} accuracy is {:.4f}%.'.format(split_name, 100 * accuracy))
+        print(f'The overall {split_name} accuracy is {100 * accuracy:.4f}%.')
 
         # Save per-video class probabilities; streams evaluated on the same split can be fused
         # by averaging their probabilities per video key
-        np.savez(os.path.join(ckpt_dir, '{}_predictions.npz'.format(split_name)),
+        np.savez(os.path.join(ckpt_dir, f'{split_name}_predictions.npz'),
                  video_keys=np.array([video_key(vid_path) for vid_path, _ in ts_split]),
                  labels=np.array(targets), probs=probs)
 
@@ -271,13 +276,13 @@ def main(args):
         for cat in all_cats:
             report_table.add_data(cat, *[report[cat][k] for k in ['precision', 'recall', 'f1-score', 'support']])
         wandb.log({
-            '{}/accuracy'.format(split_name): accuracy,
-            '{}/classification_report'.format(split_name): report_table,
-            '{}/confusion_matrix'.format(split_name): wandb.plot.confusion_matrix(
+            f'{split_name}/accuracy': accuracy,
+            f'{split_name}/classification_report': report_table,
+            f'{split_name}/confusion_matrix': wandb.plot.confusion_matrix(
                 y_true=targets, preds=outputs, class_names=all_cats),
         })
-        wandb.run.summary['{}/accuracy'.format(split_name)] = accuracy
-        wandb.run.summary['{}/macro_f1'.format(split_name)] = report['macro avg']['f1-score']
+        wandb.run.summary[f'{split_name}/accuracy'] = accuracy
+        wandb.run.summary[f'{split_name}/macro_f1'] = report['macro avg']['f1-score']
 
     else:
         raise ValueError('The mode argument must be either "train" or "eval".')
@@ -285,5 +290,4 @@ def main(args):
     wandb.finish()
 
 if __name__ == "__main__":
-    args = args_parser()
-    main(args)
+    main(args_parser())

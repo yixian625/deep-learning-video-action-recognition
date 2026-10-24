@@ -12,6 +12,7 @@ from models import LRCN
 
 
 def test_prediction_does_not_depend_on_other_videos_in_batch():
+    """A video's output is the same alone, first or second in a batch."""
     torch.manual_seed(0)
     model = LRCN(hidden_size=16, n_layers=1, dropout_rate=0.0, n_classes=5,
                  pretrained=False, cnn_model='resnet18').eval()

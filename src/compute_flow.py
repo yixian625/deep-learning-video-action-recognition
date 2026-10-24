@@ -38,10 +38,13 @@ def args_parser():
         argparse.Namespace: Parsed command-line arguments.
     """
     parser = argparse.ArgumentParser(description='Compute optical flow for video clips with RAFT')
-    parser.add_argument('-cd', '--clip_dir', default='data/UCF50_clips', help='Directory of dense clip frames (preprocess.py --sampling dense)')
+    parser.add_argument('-cd', '--clip_dir', default='data/UCF50_clips',
+                        help='Directory of dense clip frames (preprocess.py --sampling dense)')
     parser.add_argument('-fd', '--flow_dir', default='data/UCF50_flow', help='Directory for storing flow images')
-    parser.add_argument('-b', '--bound', type=float, default=20.0, help='Flow values are clipped to [-bound, bound] pixels before quantization')
-    parser.add_argument('-nw', '--num_workers', type=int, default=4, help='Number of DataLoader worker processes for reading frames')
+    parser.add_argument('-b', '--bound', type=float, default=20.0,
+                        help='Flow values are clipped to [-bound, bound] pixels before quantization')
+    parser.add_argument('-nw', '--num_workers', type=int, default=4,
+                        help='Number of DataLoader worker processes for reading frames')
     parser.add_argument('-p', '--pretrained', default=True, help='Use pretrained RAFT weights')
     parser.add_argument('--amp', action='store_true', help='Use automatic mixed precision on CUDA')
     return parser.parse_args()
@@ -109,7 +112,7 @@ def main(args):
             n_pairs = len(sorted_frame_paths(clip_path)) - 1
             if len(sorted_frame_paths(out_path, prefix='flow_y_')) < n_pairs:
                 jobs.append((clip_path, out_path))
-    print('Computing flow for {} clips....'.format(len(jobs)))
+    print(f'Computing flow for {len(jobs)} clips....')
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = raft_small(weights=Raft_Small_Weights.C_T_V2 if args.pretrained else None).eval().to(device)
@@ -120,10 +123,9 @@ def main(args):
             flow = quantize(compute_clip_flow(model, frames, device, args.amp), args.bound).cpu()
             os.makedirs(out_path, exist_ok=True)
             for i, (fx, fy) in enumerate(flow):
-                writer.submit(write_jpeg, fx.unsqueeze(0), os.path.join(out_path, 'flow_x_{}.jpg'.format(i)), quality=95)
-                writer.submit(write_jpeg, fy.unsqueeze(0), os.path.join(out_path, 'flow_y_{}.jpg'.format(i)), quality=95)
+                writer.submit(write_jpeg, fx.unsqueeze(0), os.path.join(out_path, f'flow_x_{i}.jpg'), quality=95)
+                writer.submit(write_jpeg, fy.unsqueeze(0), os.path.join(out_path, f'flow_y_{i}.jpg'), quality=95)
 
 
 if __name__ == "__main__":
-    args = args_parser()
-    main(args)
+    main(args_parser())

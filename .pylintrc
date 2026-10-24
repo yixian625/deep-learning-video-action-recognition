@@ -1,0 +1,26 @@
+[MAIN]
+# Modules in src/ import each other by bare name (from utils import ...)
+source-roots=src
+# Lint the .py files inside folder arguments (test/ is a plain folder of test files, not a package)
+recursive=yes
+
+[TYPECHECK]
+# PyTorch creates many members at runtime, and OpenCV 5 loads its compiled module at runtime,
+# so pylint cannot see their members and would wrongly report them as missing
+generated-members=torch.*,cv2.*
+
+[FORMAT]
+max-line-length=120
+
+[BASIC]
+# Short conventional names in the ML code: image height/width/channels, batch/time steps, inputs/targets
+good-names=i,j,k,_,h,w,c,t,x,y,bs,ts,lr
+
+[DESIGN]
+# Raised to fit the existing training/eval entry points (run.main, train.train, ...) instead of refactoring them
+max-args=10
+max-positional-arguments=10
+max-locals=60
+max-statements=70
+# Datasets and transforms are small classes with a single public method (__call__ / __getitem__)
+min-public-methods=1
