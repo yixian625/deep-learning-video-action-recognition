@@ -13,7 +13,7 @@ flow_x_{i} / flow_y_{i} hold the horizontal / vertical flow from frame i to fram
 [-bound, bound] pixels and quantized to [0, 255] grayscale JPEGs (see FlowClipDataset for loading).
 
 Usage:
-    python compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
+    python src/compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
 """
 
 import os

@@ -1,10 +1,12 @@
 #!/bin/bash
-# Flow: python compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
+# Run from the repo root (paths like data/ and models/ are relative to it)
+cd "$(dirname "$0")/.."
+# Flow: python src/compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
 # Head (final 1x1x1 conv) lr 5e-4, backbone lr 1e-4 (2x the RGB stream: flow differs more from the RGB pretraining)
 # BatchNorm momentum 0.01 (torchvision default 0.001) so the running statistics adapt to flow
 # 32 time steps (31 flow fields + the last one repeated): an odd T=31 is ~2.8x slower in cuDNN
 # Stops when val loss has not decreased for 10 epochs
-python run.py \
+python src/run.py \
     --frame_dir data/UCF50_flow \
     --train_size 0.8 \
     --test_size 0.1 \

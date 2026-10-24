@@ -13,6 +13,7 @@ This project implements a video classification pipeline using the UCF50 dataset 
 - [Testing and Evaluation](#testing-and-evaluation)
 - [3D CNN (S3D)](#3d-cnn-s3d)
 - [Project Structure](#project-structure)
+- [Final Results](#final-results)
 - [Customization and Hyperparameters](#customization-and-hyperparameters)
 
 ---
@@ -80,10 +81,10 @@ Before training, the raw video files must be converted into frame sequences. The
 
 - The `store_frames` function writes the extracted frames as JPEG images.
 
-`preprocess.py` uses these functions to convert every video into a folder of extracted frames:
+`src/preprocess.py` uses these functions to convert every video into a folder of extracted frames:
 
 ```bash
-python preprocess.py --video_dir data/UCF50 --frame_dir data/UCF50_frames --n_frames 16
+python src/preprocess.py --video_dir data/UCF50 --frame_dir data/UCF50_frames --n_frames 16
 ```
 
 The resulting folder structure mirrors the original dataset structure:
@@ -105,7 +106,7 @@ The resulting folder structure mirrors the original dataset structure:
 
 #### Configure Training Parameters
 
-The training is managed via a bash script (e.g., `train.sh`) that calls the main training module.  
+The training is managed via a bash script (e.g., `bash/train.sh`) that calls the main training module.  
 **Important:** Update the `--frame_dir` argument in the script to point to the directory where your preprocessed frame data is stored. You can also adjust other parameters (e.g., number of frames per video, batch size, learning rate) to see how they affect the experiment.
 
 #### Run the Training Script
@@ -113,7 +114,7 @@ The training is managed via a bash script (e.g., `train.sh`) that calls the main
 Execute the training script from your terminal:
 
 ```bash
-bash train.sh
+bash bash/train.sh
 ```
 
 ## During Training, the Script Will:
@@ -133,13 +134,13 @@ bash train.sh
 ### Step 2: Run Testing
 
 - **Configure Testing Parameters:**  
-  Update the `--ckpt` argument in your testing script (e.g., `test.sh`) to point to the saved best model weights generated during training (by default `models/lrcn/best_model_wts.pt`). The splits are loaded from the same folder.
+  Update the `--ckpt` argument in your testing script (e.g., `bash/test.sh`) to point to the saved best model weights generated during training (by default `models/lrcn/best_model_wts.pt`). The splits are loaded from the same folder.
 
 - **Run the Testing Script:**  
   Execute the testing script from your terminal:
   
 ```bash
-bash test.sh
+bash bash/test.sh
 ```
 
 ## Testing Script Overview
@@ -161,14 +162,14 @@ S3D is a separable 3D CNN from the I3D family, built from torchvision with Kinet
 1. **Extract dense clips** of 32 consecutive frames, taking every 2nd frame from the middle of each video. This is about 12.5-15 fps, close to S3D's 15 fps pretraining, and takes about 4.7 GB. Videos shorter than 63 frames are padded by repeating their last frame.
 
    ```bash
-   python preprocess.py --video_dir data/UCF50 --frame_dir data/UCF50_clips --n_frames 32 --sampling dense --stride 2
+   python src/preprocess.py --video_dir data/UCF50 --frame_dir data/UCF50_clips --n_frames 32 --sampling dense --stride 2
    ```
 
 2. **Train and evaluate:**
 
    ```bash
-   bash train_s3d.sh
-   bash test_s3d.sh
+   bash bash/train_s3d.sh
+   bash bash/test_s3d.sh
    ```
 
    These use `--model_type s3d --fr_per_vid 32 --batch_size 8 --amp --num_workers 6`. With mixed precision (`--amp`), a batch of 8 clips at 224x224 uses about 4.4 GB of GPU memory.
@@ -177,7 +178,7 @@ S3D is a separable 3D CNN from the I3D family, built from torchvision with Kinet
 
 ### Results
 
-Results are on UCF50 with the group-aware 80/10/10 split (5,343 / 668 / 670 clips), from a single run (`train_s3d.sh`, no fixed seed).
+Results are on UCF50 with the group-aware 80/10/10 split (5,343 / 668 / 670 clips), from a single run (`bash/train_s3d.sh`, no fixed seed).
 
 | Hyperparameter | Value |
 |---|---|
@@ -203,33 +204,33 @@ A second S3D stream is trained on optical flow, and its predictions are late-fus
 1. **Compute flow:** run RAFT-small (torchvision, `raft_small_C_T_V2-01064c6d.pth`, 3.8 MB, downloaded on the first run) on the 31 consecutive frame pairs of each clip in `data/UCF50_clips`, so the flow lines up in time with the RGB clips. The x and y flow, clipped to ±20 px, are stored as grayscale JPEGs `flow_x_{i}.jpg` / `flow_y_{i}.jpg` in `data/UCF50_flow`.
 
    ```bash
-   python compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
+   python src/compute_flow.py --clip_dir data/UCF50_clips --flow_dir data/UCF50_flow --amp
    ```
 
 2. **Train and evaluate the flow stream** with `--model_type s3d_flow --fr_per_vid 32`. That's 31 flow fields plus the last one repeated: an odd clip length of 31 makes cuDNN about 2.8x slower. Both streams use separate learning rates for the new classification layer (`--learning_rate 5e-4`) and the pretrained backbone (`--backbone_lr`), plus early stopping: training stops once validation loss hasn't decreased for 10 epochs (`--early_stopping_patience 10`, `--n_epochs 50` maximum). The flow stream differs from the RGB pretraining much more, so it uses a 2x higher backbone lr (1e-4 vs 5e-5 for RGB). It also uses BatchNorm momentum 0.01 (`--bn_momentum`; torchvision's S3D default of 0.001 would keep the RGB running statistics for several epochs). W&B runs are named `s3d-two-flow-train`, `s3d-two-flow-test` and `s3d-two-fusion` (`--run_name`).
 
    ```bash
-   bash train_s3d_flow.sh
-   bash test_s3d_flow.sh
+   bash bash/train_s3d_flow.sh
+   bash bash/test_s3d_flow.sh
    ```
 
    The RGB stream is retrained with the same schedule (separate lrs and early stopping; backbone lr 5e-5, default BatchNorm momentum) into `models/s3d_two_rgb/`, with W&B runs `s3d-two-rgb-train` / `s3d-two-rgb-test`:
 
    ```bash
-   bash train_s3d_rgb.sh
-   bash test_s3d_rgb.sh
+   bash bash/train_s3d_rgb.sh
+   bash bash/test_s3d_rgb.sh
    ```
 
-3. **Fuse:** `fuse.py` matches both streams' `test_predictions.npz` (`models/s3d_two_rgb/` and `models/s3d_flow/`) by video and averages their class probabilities with equal weights (the weights are not tuned on the test set). It reports RGB, flow and fused test accuracy, and logs them to W&B.
+3. **Fuse:** `src/fuse.py` matches both streams' `test_predictions.npz` (`models/s3d_two_rgb/` and `models/s3d_flow/`) by video and averages their class probabilities with equal weights (the weights are not tuned on the test set). It reports RGB, flow and fused test accuracy, and logs them to W&B.
 
    ```bash
-   bash fuse_two_stream.sh
+   bash bash/fuse_two_stream.sh
    ```
 
-   To choose the weights on the **validation** set instead, `fuse_two_stream_val_weighted.sh` evaluates both streams on the validation split (`run.py --eval_split val` writes `val_predictions.npz`). `fuse.py --val_preds` then grid-searches the flow weight (step 0.05) for the best fused validation accuracy, and applies it to the test predictions.
+   To choose the weights on the **validation** set instead, `bash/fuse_two_stream_val_weighted.sh` evaluates both streams on the validation split (`src/run.py --eval_split val` writes `val_predictions.npz`). `src/fuse.py --val_preds` then grid-searches the flow weight (step 0.05) for the best fused validation accuracy, and applies it to the test predictions.
 
    ```bash
-   bash fuse_two_stream_val_weighted.sh
+   bash bash/fuse_two_stream_val_weighted.sh
    ```
 
 **Implementation notes**
@@ -243,9 +244,9 @@ Results are on the same split and test set as [Results](#results), from single r
 
 | Model | Backbone lr | Epochs | Best val acc | **Test acc** | Test macro F1 |
 |---|---|---|---|---|---|
-| S3D RGB, original run (`train_s3d.sh`, single lr 1e-4) | 1e-4 | 20 (fixed) | 91.8% | 93.9% | 0.935 |
-| **S3D RGB stream** (`train_s3d_rgb.sh`) | 5e-5 | 23 (early stop) | 95.1% | **94.9%** | **0.949** |
-| S3D flow stream (`train_s3d_flow.sh`, BN momentum 0.01) | 1e-4 | 49 (early stop) | 82.0% | 75.7% | 0.742 |
+| S3D RGB, original run (`bash/train_s3d.sh`, single lr 1e-4) | 1e-4 | 20 (fixed) | 91.8% | 93.9% | 0.935 |
+| **S3D RGB stream** (`bash/train_s3d_rgb.sh`) | 5e-5 | 23 (early stop) | 95.1% | **94.9%** | **0.949** |
+| S3D flow stream (`bash/train_s3d_flow.sh`, BN momentum 0.01) | 1e-4 | 49 (early stop) | 82.0% | 75.7% | 0.742 |
 | Fusion, equal weights | | | | 92.5% | |
 | Fusion, weights chosen on val (RGB 0.9 / flow 0.1) | | | 95.5% | 94.9% | |
 
@@ -261,6 +262,23 @@ Results are on the same split and test set as [Results](#results), from single r
 - **Choosing the weights on the validation set** gives flow only 10% of the weight. That improves validation accuracy by 3 videos, but doesn't change a single test prediction, so the fused test accuracy equals RGB's 94.9%.
 
 The best model is the RGB stream (94.9% test). The flow stream is likely held back by its RGB-pretrained initialization: published two-stream gains, e.g. I3D, use flow streams pretrained on Kinetics flow. It is also limited by overfitting (train loss ~0.02 vs val loss ~0.9) and a single 2-second flow window per video.
+
+---
+
+## Final Results
+
+All results are on the same test set: 670 UCF50 clips from source videos that none of the models saw during training or validation (the group-aware 80/10/10 split). Each row is a single training run without a fixed seed.
+
+| Model | Test accuracy | Macro F1 | Best val accuracy |
+|---|---|---|---|
+| LRCN baseline: original settings, with all 4 bug fixes (`bash/train.sh`) | 86.6% | 0.861 | 82.6% |
+| S3D RGB (original run, `bash/train_s3d.sh`) | 93.9% | 0.935 | 91.8% |
+| **Two-stream S3D, fusion weights chosen on val (RGB 0.9 / flow 0.1)** (`bash/fuse_two_stream_val_weighted.sh`) | **94.9%** | **0.949** | 95.5%* |
+| Two-stream S3D, equal fusion weights (`bash/fuse_two_stream.sh`) | 92.5% | 0.924 | |
+
+\*The fused model's validation accuracy, at the weights the search picked.
+
+The validation-weighted two-stream model has exactly the same test results as its RGB stream alone (see [Two-stream results](#two-stream-results)). With flow at 10% of the weight, none of the 670 test predictions changes, so adding the flow stream brings no gain.
 
 ---
 
@@ -296,13 +314,13 @@ By tweaking these parameters, you can study their impact on model performance an
 ## Summary of Steps
 
 - **Step 0: Dataset Preparation**  
-  Download UCF50, extract it to `data/UCF50`, and run `preprocess.py` to extract frames into `data/UCF50_frames`.
+  Download UCF50, extract it to `data/UCF50`, and run `src/preprocess.py` to extract frames into `data/UCF50_frames`.
 
 - **Step 1: Run Training**  
-  Execute `train.sh` after configuring the `--frame_dir` and other hyperparameters to train the model.
+  Execute `bash/train.sh` after configuring the `--frame_dir` and other hyperparameters to train the model.
 
 - **Step 2: Run Testing**  
-  Execute `test.sh` after updating the `--ckpt` argument to point to the best model checkpoint to evaluate the model.
+  Execute `bash/test.sh` after updating the `--ckpt` argument to point to the best model checkpoint to evaluate the model.
 
 Happy Training!
 
@@ -310,7 +328,7 @@ Happy Training!
 
 ## Issues in Original Implementation
 
-1. **Data leak in train/val/test split:** `dataset_split` in `video_datasets.py` stratifies at the clip level. HMDB51 cuts several clips from each source video (e.g. `..._goo_0`, `..._goo_1`), so clips of the same actor and scene can end up in both train and val/test. This inflates validation and test accuracy. The fix is to use the official HMDB51 split files, or to split by source-video group (e.g. `GroupShuffleSplit`).
+1. **Data leak in train/val/test split:** `dataset_split` in `src/video_datasets.py` stratifies at the clip level. HMDB51 cuts several clips from each source video (e.g. `..._goo_0`, `..._goo_1`), so clips of the same actor and scene can end up in both train and val/test. This inflates validation and test accuracy. The fix is to use the official HMDB51 split files, or to split by source-video group (e.g. `GroupShuffleSplit`).
 2. **Frames not loaded in temporal order:** `VideoDataset.__getitem__` uses unsorted `glob`, and the names `frame0.jpg ... frame16.jpg` sort as strings (`frame10` comes before `frame2`). The LSTM therefore sees frames in a scrambled order. The fix is to sort frame paths by their numeric index.
 3. **LSTM steps over the batch instead of over time:** `LRCN.forward` loops over frames and feeds each frame's features to the LSTM as a `(batch, 1, features)` tensor, but the LSTM is created with the default `batch_first=False`, so it reads that as `(time, batch, features)`. At every frame the LSTM therefore steps through the videos in the batch as if they were time steps, and carries that state to the next frame. Each video's prediction depends on the other videos in its batch and their order, and the model does not learn per-video temporal dynamics. The fix is to pass each video's frame features as one sequence with `batch_first=True`.
 4. **Augmentation applied per frame instead of per video:** `compose_data_transforms` builds `RandomHorizontalFlip` and `RandomAffine(translate=0.1)` transforms, and `VideoDataset` applies them to each frame separately. Within one video, some frames are mirrored and others not, and every frame is shifted differently, so the LSTM sees fake motion (the person jumping between sides of the image, the scene shaking). The fix is to draw the random flip and shift once per video and apply them to all of its frames.

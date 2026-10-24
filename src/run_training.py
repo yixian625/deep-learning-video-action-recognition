@@ -1,5 +1,5 @@
 """
-Module: trainer.py
+Module: run_training.py
 
 This module provides an end-to-end training pipeline for a video classification model.
 It parses command-line arguments to configure dataset paths, model parameters, and training
@@ -16,7 +16,7 @@ hyperparameters. The module performs the following steps:
 Usage:
     Run the script from the command line with the required arguments. For example:
     
-        python trainer.py -fd /path/to/frames -nc 50 -bs 8
+        python src/run_training.py -fd /path/to/frames -nc 50 -bs 8
         
 Arguments include:
     -fd/--frame_dir: Directory where video frames are stored (required).

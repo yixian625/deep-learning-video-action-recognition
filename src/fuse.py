@@ -13,8 +13,8 @@ the weights of two streams are chosen by a grid search on the validation set and
 the test set.
 
 Usage:
-    python fuse.py --preds models/s3d/test_predictions.npz models/s3d_flow/test_predictions.npz --names rgb flow
-    python fuse.py --preds <test npz files> --val_preds <val npz files> --names rgb flow
+    python src/fuse.py --preds models/s3d/test_predictions.npz models/s3d_flow/test_predictions.npz --names rgb flow
+    python src/fuse.py --preds <test npz files> --val_preds <val npz files> --names rgb flow
 """
 
 import argparse

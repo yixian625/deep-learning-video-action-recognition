@@ -1,6 +1,8 @@
 #!/bin/bash
-# Frames: python preprocess.py -vd data/UCF50 -fd data/UCF50_clips -nf 32 --sampling dense --stride 2
-python run.py \
+# Run from the repo root (paths like data/ and models/ are relative to it)
+cd "$(dirname "$0")/.."
+# Frames: python src/preprocess.py -vd data/UCF50 -fd data/UCF50_clips -nf 32 --sampling dense --stride 2
+python src/run.py \
     --frame_dir data/UCF50_clips \
     --train_size 0.8 \
     --test_size 0.1 \

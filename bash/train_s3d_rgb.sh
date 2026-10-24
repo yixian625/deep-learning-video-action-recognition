@@ -1,7 +1,9 @@
 #!/bin/bash
+# Run from the repo root (paths like data/ and models/ are relative to it)
+cd "$(dirname "$0")/.."
 # RGB stream of the two-stream model: same settings as train_s3d_flow.sh
 # (train_s3d.sh is the original single-stream S3D run: lr 1e-4, 20 epochs)
-python run.py \
+python src/run.py \
     --frame_dir data/UCF50_clips \
     --train_size 0.8 \
     --test_size 0.1 \

@@ -1,5 +1,7 @@
 #!/bin/bash
-python run.py \
+# Run from the repo root (paths like data/ and models/ are relative to it)
+cd "$(dirname "$0")/.."
+python src/run.py \
     --ckpt models/s3d/best_model_wts.pt \
     --model_type s3d \
     --n_classes 50 \

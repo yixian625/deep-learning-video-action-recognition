@@ -14,8 +14,8 @@ Two sampling modes are supported:
       utils.get_clip_frames.
 
 Usage:
-    python preprocess.py -vd data/UCF50 -fd data/UCF50_frames -nf 16
-    python preprocess.py -vd data/UCF50 -fd data/UCF50_clips -nf 32 --sampling dense --stride 2
+    python src/preprocess.py -vd data/UCF50 -fd data/UCF50_frames -nf 16
+    python src/preprocess.py -vd data/UCF50 -fd data/UCF50_clips -nf 32 --sampling dense --stride 2
 """
 
 import os
